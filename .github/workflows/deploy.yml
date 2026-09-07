@@ -53,17 +53,16 @@ jobs:
       - name: Build
         run: npm run build
 
-      # ④b 凭据诊断（只判断存在性，不打印值；GitHub 会自动脱敏 Secrets）
-      #     若显示 EMPTY → Secrets 名字/位置配错；若 SET 但 whoami 失败 → Token 无效或权限不足
+      # ④b 凭据诊断（只判断存在性，不打印值；错误状态写 annotation 以便外部可见）
+      #     若 EMPTY → Secrets 名字/位置配错或未填值；若 SET 但 whoami 失败 → Token 无效或权限不足
       - name: Diagnose CF credentials
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: |
-          echo "CF_API_TOKEN  is $([ -n "$CF_API_TOKEN" ] && echo SET || echo EMPTY)"
-          echo "CF_ACCOUNT_ID is $([ -n "$CF_ACCOUNT_ID" ] && echo SET || echo EMPTY)"
-          echo "--- wrangler whoami ---"
-          npx wrangler whoami || echo "(whoami failed - 见上行错误)"
+          echo "::warning::CF_API_TOKEN  => $( [ -n "$CF_API_TOKEN" ] && echo SET || echo EMPTY )"
+          echo "::warning::CF_ACCOUNT_ID => $( [ -n "$CF_ACCOUNT_ID" ] && echo SET || echo EMPTY )"
+          npx wrangler whoami 2>&1 | sed -E 's/\x1B\[[0-9;]*[mK]//g' | sed 's/^/::warning::whoami => /' || echo "::warning::whoami 执行失败"
 
       # ⑤ 建库：d1 create（库已存在会报错，continue-on-error 容错继续）
       #    注意：wrangler-action 的 command 不经 shell 解析，绝不能写 `|| true` 这类
@@ -83,7 +82,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: |
           STRIP="sed -E 's/\x1B\[[0-9;]*[mK]//g'"
-          echo "::warning::d1 list => $(npx wrangler d1 list --format json 2>&1 | sed -E 's/\x1B\[[0-9;]*[mK]//g' | tr '\n' ' ' | cut -c1-1600)"
+          echo "::warning::d1 list => $(npx wrangler d1 list --json 2>&1 | sed -E 's/\x1B\[[0-9;]*[mK]//g' | tr '\n' ' ' | cut -c1-1600)"
           npx wrangler d1 execute irouter-db --remote --command="SELECT 1" 2>&1 \
             | sed -E 's/\x1B\[[0-9;]*[mK]//g' \
             | sed 's/^/::warning::probe SELECT 1 => /' || true
@@ -119,7 +118,7 @@ jobs:
       #    每次部署时从 d1 list 提取真实 id 写回 wrangler.toml，否则 deploy 必失败
       - name: Inject D1 database id
         run: |
-          DB_ID=$(npx wrangler d1 list --format json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const r=(a||[]).find(x=>x.name==='irouter-db');if(!r){console.error('D1 irouter-db not found');process.exit(1)}process.stdout.write(r.uuid||r.id)})")
+          DB_ID=$(npx wrangler d1 list --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const r=(a||[]).find(x=>x.name==='irouter-db');if(!r){console.error('D1 irouter-db not found');process.exit(1)}process.stdout.write(r.uuid||r.id)})")
           echo "D1 database_id = $DB_ID"
           sed -i "s|<DATABASE_ID>|$DB_ID|" wrangler.toml
           grep "database_id" wrangler.toml
