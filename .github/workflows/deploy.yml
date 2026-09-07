@@ -53,6 +53,18 @@ jobs:
       - name: Build
         run: npm run build
 
+      # ④b 凭据诊断（只判断存在性，不打印值；GitHub 会自动脱敏 Secrets）
+      #     若显示 EMPTY → Secrets 名字/位置配错；若 SET 但 whoami 失败 → Token 无效或权限不足
+      - name: Diagnose CF credentials
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          echo "CF_API_TOKEN  is $([ -n "$CF_API_TOKEN" ] && echo SET || echo EMPTY)"
+          echo "CF_ACCOUNT_ID is $([ -n "$CF_ACCOUNT_ID" ] && echo SET || echo EMPTY)"
+          echo "--- wrangler whoami ---"
+          npx wrangler whoami || echo "(whoami failed - 见上行错误)"
+
       # ⑤ 建库：d1 create（库已存在会报错，continue-on-error 容错继续）
       #    注意：wrangler-action 的 command 不经 shell 解析，绝不能写 `|| true` 这类
       #    shell 语法（会被当成 wrangler 参数导致必失败）；幂等靠下面的容错实现
