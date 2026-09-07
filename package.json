@@ -1,0 +1,23 @@
+{
+  "name": "irouter-cf-d1",
+  "version": "3.2.0",
+  "description": "iRouter — Cloudflare Workers + D1 (替代 Deno KV 版，小白一键部署)",
+  "type": "module",
+  "main": "worker.ts",
+  "scripts": {
+    "build": "node build.cjs",
+    "dev": "wrangler dev",
+    "deploy": "npm run build && wrangler deploy",
+    "migrate": "wrangler d1 execute irouter-db --remote --file=./schema.sql",
+    "cf:deploy": "npm run build && wrangler deploy"
+  },
+  "dependencies": {
+    "hono": "^4.13.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "typescript": "^5.6.0",
+    "wrangler": "^3.100.0",
+    "esbuild": "^0.24.0"
+  }
+}

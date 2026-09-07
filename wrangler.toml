@@ -1,0 +1,47 @@
+# irouter v3.2.0 — Cloudflare Workers + D1 配置
+# 小白部署：把 <DATABASE_ID> 换成真实值即可（见下方「首次 3 步」）
+#
+# ============================================================
+#  首次 3 步（只需做一次）：
+#    1. npm install -g wrangler && wrangler login
+#    2. wrangler d1 create irouter-db
+#       → 复制输出的 id（32 位十六进制），粘贴替换下面 <DATABASE_ID>
+#    3. git push（GitHub Actions 自动建表 + 部署）
+# ============================================================
+#  敏感配置（不要在 wrangler.toml 里写明文！）：
+#    wrangler secret put SESSION_SECRET
+#    wrangler secret put DEFAULT_ADMIN_PASS
+#    wrangler secret put PROXY_KEY
+#    wrangler secret put API_TOKEN
+#    wrangler secret put ENCRYPT_KEY
+
+name = "irouter"
+main = "worker.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# 免费额度优化：就近调度到数据库所在 region（Free 档也支持）
+[placement]
+mode = "smart"
+
+# D1 数据库绑定（替代 Deno KV）
+# ⚠️ database_name 必须与 GitHub Actions 里 d1 create 的名字完全一致
+[[d1_databases]]
+binding = "DB"
+database_name = "irouter-db"
+database_id = "<DATABASE_ID>"
+migrations_dir = "migrations"
+
+# 非敏感环境变量（明文即可）
+[vars]
+PROJECT_NAME = "iRouter"
+BASE_URL = ""
+
+# 构建：产出 dist/worker.bundle.js（与 deploy.yml 的 npm run build 对齐）
+[build]
+command = "npm run build"
+upload.main = "./dist/worker.bundle.js"
+
+# 免费额度观察：在 dashboard 看 requests / cpu 用量
+[observability]
+enabled = true

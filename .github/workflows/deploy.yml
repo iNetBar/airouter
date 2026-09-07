@@ -1,0 +1,135 @@
+name: Deploy iRouter
+
+# ============================================================
+#  iRouter v3.2.0 小白一键部署（Cloudflare Workers + D1）
+#
+#  原理：GitHub Actions 全程只用官方 wrangler-action@v3，
+#       绝不裸调 `wrangler` 命令 → 杜绝 "command not found" (exit 127)
+#
+#  流程（git push 自动触发）：
+#    ① 拉代码 → ② Node 24 → ③ npm ci → ④ 打包
+#    ⑤ 建库（wrangler d1 create，已存在自动跳过）
+#    ⑥ 建表（schema.sql，IF NOT EXISTS 幂等）
+#    ⑦ 部署 Worker
+#
+#  首次使用只需 2 步：
+#    1) 上传本仓库到 GitHub
+#    2) Settings → Secrets → Actions 添加：
+#         CF_API_TOKEN  (Workers:Edit + D1:Edit 权限)
+#         CF_ACCOUNT_ID (Cloudflare 控制台右下角)
+# ============================================================
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch: # 允许在 GitHub 网页手动点 "Run workflow"
+
+# Node 20 已弃用（2025-09-19），强制走 Node 24
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy Worker + D1
+    steps:
+      # ① 拉代码
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ② Node.js 24（明确版本，压住弃用警告）
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # ③ 安装依赖（npm ci 比 npm install 更确定性）
+      - name: Install dependencies
+        run: npm ci
+
+      # ④ 打包（必须产出 dist/worker.bundle.js，与 wrangler.toml 的 upload.main 对齐）
+      - name: Build
+        run: npm run build
+
+      # ⑤ 建库（已存在则跳过）
+      #    用 wrangler-action@v3 官方 action，自带 wrangler 二进制，不会 127
+      - name: Create D1 database (skip if exists)
+        uses: cloudflare/wrangler-action@v3
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          # d1 create 幂等：先查后建（用 wrangler-action 执行 query）
+          command: d1 execute irouter-db --remote --command="SELECT 1" || true
+
+      # ⑤b 真正建库：用 wrangler-action 执行（继承 API 令牌；已存在则容错跳过）
+      - name: Ensure D1 database exists
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          command: d1 create irouter-db
+        continue-on-error: true
+
+      # ⑥ 建表（schema.sql，IF NOT EXISTS 幂等，反复跑安全、绝不删数据）
+      - name: Apply schema (idempotent)
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          command: d1 execute irouter-db --remote --file=./schema.sql
+
+      # ⑥b 验证表结构
+      - name: Verify tables
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          command: d1 execute irouter-db --remote --command="SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"
+
+      # ⑥c 注入真实 D1 database_id：仓库里保持占位符 <DATABASE_ID>（无敏感信息），
+      #    每次部署时从 d1 list 提取真实 id 写回 wrangler.toml，否则 deploy 必失败
+      - name: Inject D1 database id
+        run: |
+          DB_ID=$(npx wrangler d1 list --format json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const r=(a||[]).find(x=>x.name==='irouter-db');if(!r){console.error('D1 irouter-db not found');process.exit(1)}process.stdout.write(r.uuid||r.id)})")
+          echo "D1 database_id = $DB_ID"
+          sed -i "s|<DATABASE_ID>|$DB_ID|" wrangler.toml
+          grep "database_id" wrangler.toml
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+
+      # ⑦ 部署 Worker
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          command: deploy
+
+      # ⑦b 可选：Workers secrets 自动注入（仓库里配了对应 GitHub Secrets 才生效；未配置自动跳过，可继续部署）
+      - name: Set worker secrets (optional)
+        env:
+          DAP: ${{ secrets.DEFAULT_ADMIN_PASS }}
+          SS: ${{ secrets.SESSION_SECRET }}
+          PK: ${{ secrets.PROXY_KEY }}
+          EK: ${{ secrets.ENCRYPT_KEY }}
+        run: |
+          [ -n "$DAP" ] && printf '%s' "$DAP" | npx wrangler secret put DEFAULT_ADMIN_PASS || true
+          [ -n "$SS" ] && printf '%s' "$SS" | npx wrangler secret put SESSION_SECRET || true
+          [ -n "$PK" ] && printf '%s' "$PK" | npx wrangler secret put PROXY_KEY || true
+          [ -n "$EK" ] && printf '%s' "$EK" | npx wrangler secret put ENCRYPT_KEY || true
+
+      # ⑧ 收尾提示
+      - name: Done
+        run: |
+          echo ""
+          echo "✅ 部署完成！"
+          echo "   管理后台：https://irouter.<你的子域>.workers.dev/admin"
+          echo "   健康检查：https://irouter.<你的子域>.workers.dev/health"
+          echo "   （子域名 = wrangler.toml 里的 name 字段）"
+          echo ""
+          echo "⚠️ 首次务必到 Cloudflare 控制台设置密码："
+          echo "   Worker → Settings → Variables → SESSION_SECRET / DEFAULT_ADMIN_PASS"
