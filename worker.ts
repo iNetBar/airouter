@@ -476,6 +476,9 @@ export default {
         db.logRing.startTimer(env.DB);
 
         // ---------- SPA 兜底路由：必须在所有 /admin/api/* 之后声明，否则会拦截 API ----------
+        // 首页 = 管理后台预览：/ 与 /admin 返回同一 SPA，前端 init() 自动探测登录态
+        // （未登录 → 渲染登录页；已登录 → 渲染管理界面，行为与 /admin 完全一致）
+        app.get('/', (c) => c.html(ADMIN_HTML));
         app.get('/admin', (c) => c.html(ADMIN_HTML));
         app.get('/admin/*', (c) => c.html(ADMIN_HTML));
 
