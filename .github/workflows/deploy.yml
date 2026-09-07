@@ -43,9 +43,11 @@ jobs:
         with:
           node-version: '24'
 
-      # ③ 安装依赖（npm ci 比 npm install 更确定性）
+      # ③ 安装依赖（用 npm install 而非 npm ci）
+      #    lock 在 Windows 上生成时只含本平台可选依赖（esbuild 的 @esbuild/win32-x64）；
+      #    Linux 上 npm ci 会因缺 @esbuild/linux-x64 等报 EUSAGE，而 npm install 会按平台自动补齐
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       # ④ 打包（必须产出 dist/worker.bundle.js，与 wrangler.toml 的 upload.main 对齐）
       - name: Build
