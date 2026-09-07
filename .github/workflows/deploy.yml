@@ -8,7 +8,7 @@ name: Deploy iRouter
 #
 #  流程（git push 自动触发）：
 #    ① 拉代码 → ② Node 24 → ③ npm ci → ④ 打包
-#    ⑤ 建库（wrangler d1 create，已存在自动跳过）
+#    ⑤ 建库（wrangler d1 create，已存在容错继续）
 #    ⑥ 建表（schema.sql，IF NOT EXISTS 幂等）
 #    ⑦ 部署 Worker
 #
@@ -53,20 +53,9 @@ jobs:
       - name: Build
         run: npm run build
 
-      # ⑤ 建库（已存在则跳过）
-      #    用 wrangler-action@v3 官方 action，自带 wrangler 二进制，不会 127
-      - name: Create D1 database (skip if exists)
-        uses: cloudflare/wrangler-action@v3
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-        with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          # d1 create 幂等：先查后建（用 wrangler-action 执行 query）
-          command: d1 execute irouter-db --remote --command="SELECT 1" || true
-
-      # ⑤b 真正建库：用 wrangler-action 执行（继承 API 令牌；已存在则容错跳过）
+      # ⑤ 建库：d1 create（库已存在会报错，continue-on-error 容错继续）
+      #    注意：wrangler-action 的 command 不经 shell 解析，绝不能写 `|| true` 这类
+      #    shell 语法（会被当成 wrangler 参数导致必失败）；幂等靠下面的容错实现
       - name: Ensure D1 database exists
         uses: cloudflare/wrangler-action@v3
         with:
