@@ -745,12 +745,12 @@ function render_conn(s){
   var curl = 'curl -X POST "'+baseUrl+'/v1/chat/completions" \\\\\\n'
            + '  -H "Authorization: Bearer '+esc(s.apiToken||'YOUR_TOKEN')+'" \\\\\\n'
            + '  -H "Content-Type: application/json" \\\\\\n'
-           + '  -d \'{ "model": "gpt-4o-mini", "messages": [{"role":"user","content":"hello"}] }\'';
+           + '  -d \\'{ "model": "gpt-4o-mini", "messages": [{"role":"user","content":"hello"}] }\\'';
   document.getElementById('conn').innerHTML = ''
     + row_html('🏷️ 项目名', esc(s.projectName||'iRouter')+' <span class="badge ok">v3.2.0 · D1</span>')
-    + row_html('🌐 网关 Base URL', '<code id="conn-url">'+esc(baseUrl)+'</code> <span class="copy" onclick="copyText(\'conn-url\')">📋 复制</span>')
-    + row_html('🔑 调用 Token', '<code id="conn-token">'+esc(token)+'</code> <span class="copy" onclick="copyText(\'conn-token\')">📋 复制</span>')
-    + '<div style="margin-top:14px"><label style="font-size:12px;color:#8b949e">📦 快速调用示例（curl）</label><pre id="conn-curl">'+esc(curl)+'</pre><span class="copy" onclick="copyText(\'conn-curl\')">📋 复制</span></div>';
+    + row_html('🌐 网关 Base URL', '<code id="conn-url">'+esc(baseUrl)+'</code> <span class="copy" onclick="copyText(\\'conn-url\\')">📋 复制</span>')
+    + row_html('🔑 调用 Token', '<code id="conn-token">'+esc(token)+'</code> <span class="copy" onclick="copyText(\\'conn-token\\')">📋 复制</span>')
+    + '<div style="margin-top:14px"><label style="font-size:12px;color:#8b949e">📦 快速调用示例（curl）</label><pre id="conn-curl">'+esc(curl)+'</pre><span class="copy" onclick="copyText(\\'conn-curl\\')">📋 复制</span></div>';
 }
 
 function row_html(k,v){return '<div class="row"><div><div style="font-size:12px;color:#8b949e">'+k+'</div><div style="font-size:14px;margin-top:4px">'+v+'</div></div></div>';}
@@ -790,8 +790,8 @@ function render_prov_table(){
   tb.innerHTML=state.providers.map(function(p){
     return '<tr><td>'+esc(p.name)+'</td><td><code>'+esc(p.id)+'</code></td><td><code style="font-size:11px">'+esc(p.base_url)+'</code></td><td>'+esc(p.protocol)+'</td>'
       + '<td>'+(p.enabled?'<span class="badge ok">启用</span>':'<span class="badge err">停用</span>')+'</td>'
-      + '<td><button class="btn ghost" onclick="editProvider(\''+esc(p.id)+'\')">编辑</button> '
-      + (p.builtin?'<span style="font-size:11px;color:#8b949e">内置</span>':'<button class="btn danger" onclick="deleteProvider(\''+esc(p.id)+'\')">删除</button>')+'</td></tr>';
+      + '<td><button class="btn ghost" onclick="editProvider(\\''+esc(p.id)+'\\')">编辑</button> '
+      + (p.builtin?'<span style="font-size:11px;color:#8b949e">内置</span>':'<button class="btn danger" onclick="deleteProvider(\\''+esc(p.id)+'\\')">删除</button>')+'</td></tr>';
   }).join('');
 }
 window.openProvider=function(){setModal('<h3>添加供应商</h3>'
@@ -802,7 +802,7 @@ window.submitProvider=function(){api('POST','/admin/api/providers',{name:documen
 window.editProvider=function(id){var p=state.providers.find(function(x){return x.id===id;});if(!p)return;setModal('<h3>编辑供应商</h3>'
   +'<div class="form-row"><div style="flex:1"><label>名称</label><input id="m-name" value="'+esc(p.name)+'"></div><div style="flex:1"><label>Base URL</label><input id="m-url" value="'+esc(p.base_url)+'"></div></div>'
   +'<div class="form-row"><label>启用</label><select id="m-enabled"><option value="1"'+(p.enabled?' selected':'')+'>启用</option><option value="0"'+(!p.enabled?' selected':'')+'>停用</option></select></div>'
-  +'<button class="btn" onclick="submitEditProvider(\''+esc(id)+'\')">保存</button>');};
+  +'<button class="btn" onclick="submitEditProvider(\\''+esc(id)+'\\')">保存</button>');};
 window.submitEditProvider=function(id){api('PUT','/admin/api/providers/'+id,{name:document.getElementById('m-name').value,base_url:document.getElementById('m-url').value,enabled:document.getElementById('m-enabled').value==='1'}).then(function(){closeModal();render_providers(document.getElementById('view'));toast('✅ 已更新');});};
 window.deleteProvider=function(id){if(!confirm('确认删除？'))return;api('DELETE','/admin/api/providers/'+id).then(function(){render_providers(document.getElementById('view'));toast('🗑️ 已删除');});};
 
@@ -819,7 +819,7 @@ function render_route_table(){
       +'<td>'+(r.providers||[]).map(esc).join(' → ')+'</td>'
       +'<td>'+(r.fallback||[]).map(esc).join(' → ')||'<span style="color:#8b949e">-</span>'+
       '</td><td>'+(r.priority||0)+'</td>'
-      +'<td><button class="btn ghost" onclick="editRoute(\''+esc(r.id)+'\')">编辑</button> <button class="btn danger" onclick="deleteRoute(\''+esc(r.id)+'\')">删除</button></td></tr>';
+      +'<td><button class="btn ghost" onclick="editRoute(\\''+esc(r.id)+'\\')">编辑</button> <button class="btn danger" onclick="deleteRoute(\\''+esc(r.id)+'\\')">删除</button></td></tr>';
   }).join('');
 }
 window.openRoute=function(){setModal('<h3>添加路由规则</h3>'
@@ -832,7 +832,7 @@ window.editRoute=function(id){var r=state.routes.find(function(x){return x.id===
   +'<div class="form-row"><div style="flex:1"><label>名称</label><input id="r-name" value="'+esc(r.name||'')+'"></div><div style="flex:1"><label>匹配模式</label><input id="r-pattern" value="'+esc(r.pattern)+'"></div></div>'
   +'<div class="form-row"><div style="flex:1"><label>命中供应商</label><input id="r-prov" value="'+esc((r.providers||[]).join(','))+'"></div><div style="flex:1"><label>兜底</label><input id="r-fb" value="'+esc((r.fallback||[]).join(','))+'"></div></div>'
   +'<div class="form-row"><label>优先级</label><input id="r-pri" type="number" value="'+esc(r.priority||0)+'"></div>'
-  +'<button class="btn" onclick="submitEditRoute(\''+esc(id)+'\')">保存</button>');};
+  +'<button class="btn" onclick="submitEditRoute(\\''+esc(id)+'\\')">保存</button>');};
 window.submitEditRoute=function(id){api('PUT','/admin/api/routes/'+id,{name:document.getElementById('r-name').value,pattern:document.getElementById('r-pattern').value,providers:document.getElementById('r-prov').value.split(',').map(function(s){return s.trim();}).filter(Boolean),fallback:document.getElementById('r-fb').value.split(',').map(function(s){return s.trim();}).filter(Boolean),priority:parseInt(document.getElementById('r-pri').value)||0}).then(function(){closeModal();render_routes(document.getElementById('view'));toast('✅ 已更新');});};
 window.deleteRoute=function(id){if(!confirm('确认删除？'))return;api('DELETE','/admin/api/routes/'+id).then(function(){render_routes(document.getElementById('view'));toast('🗑️ 已删除');});};
 
@@ -846,7 +846,7 @@ function render_key_table(){
   var tb=document.getElementById('key-tbody');
   tb.innerHTML=state.keys.map(function(k){
     return '<tr><td>'+esc(k.name||'(未命名)')+'</td><td><code>'+esc(k.provider_id)+'</code></td><td><code>'+esc(k.masked||'****')+'</code></td>'
-      +'<td><button class="btn danger" onclick="deleteKey(\''+esc(k.id)+'\')">删除</button></td></tr>';
+      +'<td><button class="btn danger" onclick="deleteKey(\\''+esc(k.id)+'\\')">删除</button></td></tr>';
   }).join('')||'<tr><td colspan="4" style="text-align:center;color:#8b949e;padding:20px">暂无 Key，添加后供应商方可转发</td></tr>';
 }
 window.openKey=function(){var opts=state.providers.map(function(p){return '<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>';}).join('');setModal('<h3>添加 API Key</h3>'
@@ -865,7 +865,7 @@ function render_guide(main){
 function render_guide_mini(){
   var mount=document.getElementById('guide-mount');
   if(!mount) return;
-  mount.innerHTML='<div class="panel" style="border-color:#58a6ff"><h3>👋 欢迎使用 iRouter v3.2.0（Cloudflare D1 版）</h3><div id="guide-mini-body"></div><button class="btn ghost" onclick="document.getElementById(\\'guide-mount\\').innerHTML=\\''\\'">关闭</button></div>';
+  mount.innerHTML='<div class="panel" style="border-color:#58a6ff"><h3>👋 欢迎使用 iRouter v3.2.0（Cloudflare D1 版）</h3><div id="guide-mini-body"></div><button class="btn ghost" onclick="document.getElementById(\\'guide-mount\\').innerHTML=\\'\\'">关闭</button></div>';
   render_guide_content(document.getElementById('guide-mini-body'), true);
   if(!localStorage.getItem('irouter_guide_dismissed')){
     setTimeout(function(){var b=document.getElementById('guide-mini-body');if(b) render_guide_content(b,true);},50);
