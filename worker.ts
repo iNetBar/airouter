@@ -224,6 +224,9 @@ export default {
                 return err(401, '密码错误');
             }
             loginFailures.delete(ip);
+            if (!env.SESSION_SECRET) {
+                return err(500, '未配置 SESSION_SECRET：请先在 Cloudflare 控制台 → Settings → Variables 中设置会话密钥（任意长随机串），否则无法登录');
+            }
             const sig = await hmacSha256(env.SESSION_SECRET, 'admin');
             const sid = btoa('admin:' + sig);
             return new Response(JSON.stringify({ ok: true }), {
