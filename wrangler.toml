@@ -16,7 +16,7 @@
 #    wrangler secret put ENCRYPT_KEY
 
 name = "irouter"
-main = "worker.ts"
+main = "./dist/worker.bundle.js"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
@@ -37,10 +37,9 @@ migrations_dir = "migrations"
 PROJECT_NAME = "iRouter"
 BASE_URL = ""
 
-# 构建：产出 dist/worker.bundle.js（与 deploy.yml 的 npm run build 对齐）
-[build]
-command = "npm run build"
-upload.main = "./dist/worker.bundle.js"
+# 构建：CI 已先跑 npm run build 产出 dist/worker.bundle.js（见 .github/workflows/deploy.yml）
+# 注意：wrangler 3.x 禁止同时定义 main 与 build.upload.main（会直接配置解析失败），
+#       因此这里用 main 直接指向构建产物，不再使用 [build] 段
 
 # 免费额度观察：在 dashboard 看 requests / cpu 用量
 [observability]
