@@ -5,6 +5,9 @@ node_modules/
 dist/
 *.bundle.js
 
+# wrangler 本地调试缓存（pages dev 生成的临时 bundle 与本地 D1 sqlite）
+.wrangler/
+
 # 环境变量 / 密钥 (绝不提交)
 .env
 .env.*
