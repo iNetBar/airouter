@@ -28,14 +28,14 @@ function main() {
     entryPoints: [path.join(process.cwd(), 'worker.ts')],
     bundle: true,
     format: 'esm',
-    outfile: path.join(process.cwd(), 'dist', 'worker.bundle.js'),
+    outfile: path.join(process.cwd(), 'dist', '_worker.js'),
     platform: 'browser',
     target: 'es2022',
     external: ['@cloudflare/workers-types'],
     nodePaths: [nm],
     logLevel: 'warning',
   }).then(function (result) {
-    const out = path.join(process.cwd(), 'dist', 'worker.bundle.js');
+    const out = path.join(process.cwd(), 'dist', '_worker.js');
     const code = fs.readFileSync(out, 'utf8');
     console.log('✅ 构建成功:', out, '(' + code.length + ' bytes)');
 

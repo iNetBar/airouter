@@ -7,9 +7,9 @@
   "scripts": {
     "build": "node build.cjs",
     "dev": "wrangler dev",
-    "deploy": "npm run build && wrangler deploy",
+    "deploy": "npm run build && wrangler pages deploy dist --project-name irouter --branch main --commit-dirty=true",
     "migrate": "wrangler d1 execute irouter-db --remote --file=./schema.sql",
-    "cf:deploy": "npm run build && wrangler deploy"
+    "cf:deploy": "npm run build && wrangler pages deploy dist --project-name irouter --branch main --commit-dirty=true"
   },
   "dependencies": {
     "hono": "^4.13.7"

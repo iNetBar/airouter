@@ -1,4 +1,4 @@
-# iRouter（Cloudflare Workers + D1 版）
+# iRouter（Cloudflare Pages + D1 版）
 
 一个 LLM API 统一网关：多供应商 Key 管理、智能路由、用量统计、可视化后台。
 **本版本专为小白设计：数据库自动建、表自动建，push 代码即部署。**
@@ -11,7 +11,7 @@
 2. 安装 [Node.js](https://nodejs.org)（LTS 版，一路下一步）
 3. 拿到两个值：
    - **Account ID**：登录 Cloudflare 后，控制台右下角
-   - **API Token**：`My Profile → API Tokens → Create Token`，用 "Edit Cloudflare Workers" 模板，并加上 **D1:Edit** 权限
+   - **API Token**：`My Profile → API Tokens → Create Token`，用 "Edit Cloudflare Workers" 模板，并加上 **D1:Edit + Pages:Edit** 权限
 4. 登录 wrangler（命令行工具）：
    ```
    npm install -g wrangler
@@ -31,8 +31,10 @@
 2. 仓库 → **Settings → Secrets and variables → Actions** 添加两个密钥：
    - `CF_API_TOKEN` = 你的 API Token
    - `CF_ACCOUNT_ID` = 你的 Account ID
-3. 仓库 → **Actions** 标签 → 选 `Deploy to Cloudflare Workers` → **Run workflow**
+3. 仓库 → **Actions** 标签 → 选 `Deploy iRouter` → **Run workflow**
 4. 等日志变绿勾 ✅（自动建库 + 建表 + 部署一气呵成）
+
+部署完成后线上地址为 **https://irouter.pages.dev**。
 
 详见 **[部署指南.md](./部署指南.md)**。
 
@@ -51,7 +53,7 @@ bash deploy.sh        # Windows 用户双击 deploy.bat
 
 ## 三、首次必做：设置管理员密码
 
-部署后到 Cloudflare 控制台 → **Workers & Pages → irouter → Settings → Variables**：
+部署后到 Cloudflare 控制台 → **Workers & Pages → irouter → Settings → Variables and Secrets**：
 
 | 变量名 | 说明 | 是否必填 |
 |--------|------|----------|
@@ -68,9 +70,10 @@ bash deploy.sh        # Windows 用户双击 deploy.bat
 
 ## 四、访问
 
-- 管理后台：`https://irouter.<你的子域>.workers.dev/admin`
-- 健康检查：`https://irouter.<你的子域>.workers.dev/health`
-- 子域名 = `wrangler.toml` 里的 `name` 字段（默认 `irouter`）
+- 线上地址：`https://irouter.pages.dev`
+- 管理后台：`https://irouter.pages.dev/admin`
+- 健康检查：`https://irouter.pages.dev/health`
+- 每次部署的临时预览：`https://<哈希>.irouter.pages.dev`（部署详情页可见）
 
 ---
 
@@ -81,7 +84,7 @@ bash deploy.sh        # Windows 用户双击 deploy.bat
 | 方式 | 建库 | 建表 |
 |------|------|------|
 | GitHub Actions（方式 A） | workflow 自动 `wrangler d1 create` | 自动跑 `schema.sql` |
-| 本地脚本（方式 B） | 首次 `wrangler deploy` 自动建 | `deploy.sh` 自动跑 `schema.sql` |
+| 本地脚本（方式 B） | 首次 `wrangler pages deploy` 自动建 | `deploy.sh` 自动跑 `schema.sql` |
 
 `schema.sql` 全部用 `CREATE TABLE IF NOT EXISTS`，**反复执行也安全，不会清掉已有数据**。
 

@@ -1,4 +1,4 @@
-# irouter v3.2.0 — Cloudflare Workers + D1 配置
+# irouter v3.2.0 — Cloudflare Pages + D1 配置
 # 小白部署：把 <DATABASE_ID> 换成真实值即可（见下方「首次 3 步」）
 #
 # ============================================================
@@ -6,7 +6,7 @@
 #    1. npm install -g wrangler && wrangler login
 #    2. wrangler d1 create irouter-db
 #       → 复制输出的 id（32 位十六进制），粘贴替换下面 <DATABASE_ID>
-#    3. git push（GitHub Actions 自动建表 + 部署）
+#    3. git push（GitHub Actions 自动建表 + 部署到 Pages）
 # ============================================================
 #  敏感配置（不要在 wrangler.toml 里写明文！）：
 #    wrangler secret put SESSION_SECRET
@@ -16,7 +16,12 @@
 #    wrangler secret put ENCRYPT_KEY
 
 name = "irouter"
-main = "./dist/worker.bundle.js"
+
+# Pages 部署目录：声明后 wrangler pages deploy 会读取本文件的
+# d1_databases / vars / compatibility 等全部绑定配置（否则配置被忽略、无 D1 绑定）
+# Worker 入口为 dist/_worker.js（Pages Advanced 模式自动识别），故不再定义 main
+pages_build_output_dir = "dist"
+
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
@@ -37,9 +42,10 @@ migrations_dir = "migrations"
 PROJECT_NAME = "iRouter"
 BASE_URL = ""
 
-# 构建：CI 已先跑 npm run build 产出 dist/worker.bundle.js（见 .github/workflows/deploy.yml）
-# 注意：wrangler 3.x 禁止同时定义 main 与 build.upload.main（会直接配置解析失败），
-#       因此这里用 main 直接指向构建产物，不再使用 [build] 段
+# 构建：CI 先把 dist/_worker.js 打包好（见 .github/workflows/deploy.yml），
+#       Pages Advanced 模式自动以 dist/_worker.js 为入口，无需再定义 main
+# 注意：wrangler 3.x 禁止同时定义 main 与 pages_build_output_dir（配置解析失败），
+#       Pages 部署只要 pages_build_output_dir，Workers 部署才需要 main
 
 # 免费额度观察：在 dashboard 看 requests / cpu 用量
 [observability]

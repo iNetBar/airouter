@@ -14,14 +14,14 @@
 set -e
 
 # -------- 按需修改这 3 个 --------
-WORKER_NAME="irouter"        # 你的 Worker 名字（也是访问子域名）
+PROJECT_NAME="irouter"         # 你的 Pages 项目名（也是 pages.dev 域名前缀）
 DB_NAME="irouter-db"         # D1 数据库名字
 ACCOUNT_ID=""                # <<< 填你的 Cloudflare Account ID
 # ---------------------------------
 
 echo ""
 echo "===== iRouter 一键部署 ====="
-echo "Worker 名：$WORKER_NAME"
+echo "Pages 项目名：$PROJECT_NAME"
 echo "数据库名：$DB_NAME"
 echo ""
 
@@ -65,12 +65,12 @@ npx wrangler d1 execute "$DB_NAME" --remote --file=./schema.sql
 
 # 6. 设置必要的环境变量（幂等：已存在则跳过，不覆盖用户改过的强密码/密钥）
 echo ">>> [5/6] 检查并设置运行所需的环境变量..."
-EXISTING_SECRETS=$(npx wrangler secret list --name "$WORKER_NAME" 2>/dev/null)
+EXISTING_SECRETS=$(npx wrangler pages secret list --project-name "$PROJECT_NAME" 2>/dev/null)
 set_secret() { # $1=变量名  $2=值
   if echo "$EXISTING_SECRETS" | grep -q "$1"; then
-    echo "    $1 已存在，跳过（如需修改：npx wrangler secret put $1）"
+    echo "    $1 已存在，跳过（如需修改：npx wrangler pages secret put $1 --project-name $PROJECT_NAME）"
   else
-    npx wrangler secret put "$1" <<< "$2"
+    npx wrangler pages secret put "$1" --project-name "$PROJECT_NAME" <<< "$2"
   fi
 }
 set_secret SESSION_SECRET "${SESSION_SECRET:-irouter-session-$(date +%s)}"
@@ -84,12 +84,13 @@ if [ -n "${API_TOKEN:-}" ]; then
 fi
 set_secret PROJECT_NAME "iRouter"
 
-# 7. 部署
-echo ">>> [6/6] 部署到 Cloudflare Workers..."
-npx wrangler deploy --name "$WORKER_NAME"
+# 7. 部署（先确保 Pages 项目存在，再部署 dist；Inject 过 database_id 后 working tree 是 dirty 的）
+echo ">>> [6/6] 部署到 Cloudflare Pages..."
+npx wrangler pages project create "$PROJECT_NAME" --production-branch main >/dev/null 2>&1 || true
+npx wrangler pages deploy dist --project-name "$PROJECT_NAME" --branch main --commit-dirty=true
 
 echo ""
 echo "✅ 部署完成！"
-echo "   管理后台：https://$WORKER_NAME.<你的子域>.workers.dev/admin"
-echo "   健康检查：https://$WORKER_NAME.<你的子域>.workers.dev/health"
+echo "   管理后台：https://$PROJECT_NAME.pages.dev/admin"
+echo "   健康检查：https://$PROJECT_NAME.pages.dev/health"
 echo "   首次登录后请立即修改管理员密码。"
