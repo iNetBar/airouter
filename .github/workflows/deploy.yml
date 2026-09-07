@@ -152,6 +152,9 @@ jobs:
       #     若在部署之后再 put，本次部署不会包含新 secret，必须再等下一次部署才生效（"设置后不生效"的经典坑）。
       - name: Set Pages secrets (optional)
         env:
+          # 裸 wrangler 命令必须显式提供认证，否则 put 会因无法认证而静默失败（|| true 吞掉错误）
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           DAP: ${{ secrets.DEFAULT_ADMIN_PASS }}
           SS: ${{ secrets.SESSION_SECRET }}
           PK: ${{ secrets.PROXY_KEY }}
