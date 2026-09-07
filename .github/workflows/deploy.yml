@@ -147,14 +147,9 @@ jobs:
           command: pages project create irouter --production-branch main
         continue-on-error: true
 
-      - name: Deploy Pages
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          command: pages deploy dist --project-name irouter --branch main --commit-dirty=true
-
       # ⑦b 可选：Pages secrets 自动注入（仓库里配了对应 GitHub Secrets 才生效；未配置自动跳过，可继续部署）
+      #     ⚠️ 必须在 Deploy Pages 之前执行！Pages 的 secret/变量是随 deployment 构建时快照的，
+      #     若在部署之后再 put，本次部署不会包含新 secret，必须再等下一次部署才生效（"设置后不生效"的经典坑）。
       - name: Set Pages secrets (optional)
         env:
           DAP: ${{ secrets.DEFAULT_ADMIN_PASS }}
@@ -167,7 +162,15 @@ jobs:
           [ -n "$PK" ] && printf '%s' "$PK" | npx wrangler pages secret put PROXY_KEY --project-name irouter || true
           [ -n "$EK" ] && printf '%s' "$EK" | npx wrangler pages secret put ENCRYPT_KEY --project-name irouter || true
 
-      # ⑧ 收尾提示
+      # ⑦ 部署 dist → https://irouter.pages.dev
+      #    --commit-dirty=true：Inject 步骤改过 wrangler.toml，working tree 是 dirty 的
+      #    --branch main：舞台为 production，发布到 pages.dev 主域
+      - name: Deploy Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          command: pages deploy dist --project-name irouter --branch main --commit-dirty=true
       - name: Done
         run: |
           echo ""
