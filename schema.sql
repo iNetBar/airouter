@@ -1,9 +1,8 @@
 -- iRouter v3.2.0 — Cloudflare D1 schema
 -- 部署：wrangler d1 execute irouter --remote --file=./schema.sql
 -- 本地：wrangler d1 execute irouter --local  --file=./schema.sql
-
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
+-- 注意：不要在 D1 上执行 PRAGMA journal_mode / foreign_keys ——
+--       D1 托管引擎内建 WAL，且远程不接受这类 PRAGMA（会直接报错中断整个文件）
 
 -- 1. 供应商（含内置 22 家 + 自建）
 CREATE TABLE IF NOT EXISTS providers (
