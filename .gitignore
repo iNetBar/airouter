@@ -22,3 +22,9 @@ wrangler.toml.local
 
 # 浏览器自动化临时产物
 .dumate/
+
+# 本地 UI 预览临时产物
+.preview-profile/
+preview/
+
+.preview-profile2/

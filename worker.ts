@@ -544,73 +544,126 @@ const ADMIN_HTML = `<!DOCTYPE html>
     --accent:#58a6ff;--input-bg:#0d1117;--nav:#c9d1d9;--nav-hover:#21262d;--active-bg:#1f6feb22;
     --green:#238636;--green-h:#2ea043;--danger:#f85149;
     --ok-bg:#23863633;--ok-fg:#3fb950;--err-bg:#f8514933;--err-fg:#f85149;--warn-bg:#d2992233;--warn-fg:#d29922;
-    --overlay:#0008;--pre-bg:#0d1117;--pre-fg:#a5d6ff;
+    --overlay:#0008;--pre-bg:#0d1117;--pre-fg:#a5d6ff;--shadow:0 2px 10px rgba(0,0,0,.25);
   }
   html[data-theme="light"]{
     --bg:#ffffff;--fg:#1f2328;--panel:#f6f8fa;--border:#d0d7de;--muted:#656d76;
     --accent:#0969da;--input-bg:#ffffff;--nav:#57606a;--nav-hover:#eaeef2;--active-bg:#ddf4ff;
     --green:#1f883d;--green-h:#1a7f37;--danger:#cf222e;
     --ok-bg:#dafbe1;--ok-fg:#1a7f37;--err-bg:#ffebe9;--err-fg:#cf222e;--warn-bg:#fff8c5;--warn-fg:#9a6700;
-    --overlay:#0006;--pre-bg:#f6f8fa;--pre-fg:#0550ae;
+    --overlay:#0006;--pre-bg:#f6f8fa;--pre-fg:#0550ae;--shadow:0 2px 10px rgba(0,0,0,.06);
   }
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--fg);line-height:1.6;transition:background .2s,color .2s}
+  button{font-family:inherit}
+  ::-webkit-scrollbar{width:8px;height:8px}
+  ::-webkit-scrollbar-thumb{background:var(--border);border-radius:999px}
+  ::-webkit-scrollbar-track{background:transparent}
   .layout{display:flex;min-height:100vh}
-  .sidebar{width:220px;background:var(--panel);border-right:1px solid var(--border);padding:20px 0;position:sticky;top:0;height:100vh;overflow:auto}
-  .brand{padding:0 20px 20px;border-bottom:1px solid var(--border);margin-bottom:12px}
-  .brand h1{font-size:20px;color:var(--accent);letter-spacing:1px}
-  .brand small{color:var(--muted);font-size:12px}
-  .nav a{display:block;padding:10px 20px;color:var(--nav);text-decoration:none;font-size:14px;border-left:3px solid transparent;transition:.15s}
+  .sidebar{width:230px;background:linear-gradient(180deg,var(--panel),var(--bg));border-right:1px solid var(--border);padding:20px 12px;position:sticky;top:0;height:100vh;overflow-y:auto}
+  .brand{display:flex;align-items:center;gap:12px;padding:0 10px 16px;border-bottom:1px solid var(--border);margin-bottom:10px}
+  .brand-text{min-width:0}
+  .nav-toggle{display:none;align-items:center;justify-content:center;width:40px;height:40px;background:var(--nav-hover);border:1px solid var(--border);border-radius:12px;color:var(--fg);cursor:pointer;flex-shrink:0;padding:0;transition:background .15s,color .15s}
+  .nav-toggle:hover{color:var(--accent);border-color:var(--accent)}
+  .nav-toggle.open{background:var(--active-bg);color:var(--accent);border-color:var(--accent)}
+  /* 移动端固定顶栏（App Bar）：仅 ≤768px 显示，桌面隐藏 */
+  .appbar{display:none}
+  .brand h1{font-size:20px;color:var(--accent);letter-spacing:1px;display:flex;align-items:center;gap:8px}
+  .brand h1::before{content:"";width:10px;height:10px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--green));box-shadow:0 0 10px var(--accent);flex-shrink:0}
+  .brand small{color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .nav a{display:block;padding:9px 16px;color:var(--nav);text-decoration:none;font-size:14px;border-radius:999px;margin:2px 0;transition:background .15s,color .15s}
   .nav a:hover{background:var(--nav-hover);color:var(--fg)}
-  .nav a.active{background:var(--active-bg);color:var(--accent);border-left-color:var(--accent)}
-  .main{flex:1;padding:28px 36px;overflow:auto}
-  .topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px}
-  .topbar h2{font-size:20px;font-weight:600}
+  .nav a.active{background:var(--active-bg);color:var(--accent);font-weight:600}
+  .main{flex:1;padding:20px 36px 32px;overflow:auto}
+  .topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;gap:12px;flex-wrap:wrap}
+  .topbar h2{font-size:20px;font-weight:700}
   .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:24px}
-  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:18px;box-shadow:var(--shadow);transition:transform .15s,box-shadow .15s}
+  .card:hover{transform:translateY(-2px);box-shadow:0 6px 16px rgba(0,0,0,.12)}
   .card .label{color:var(--muted);font-size:13px;margin-bottom:6px}
   .card .value{font-size:28px;font-weight:700;color:var(--accent)}
   .card .sub{font-size:12px;color:var(--muted);margin-top:4px}
-  .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:24px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px;margin-bottom:24px;box-shadow:var(--shadow)}
   .panel h3{font-size:15px;margin-bottom:14px;color:var(--fg)}
-  .theme-toggle{display:block;width:calc(100% - 40px);margin:12px 20px;padding:9px 0;background:transparent;border:1px solid var(--border);color:var(--nav);border-radius:6px;cursor:pointer;font-size:13px;text-align:center}
-  .theme-toggle:hover{background:var(--nav-hover);color:var(--fg)}
+  /* 主题切换：内置于 brand 行，iRouter 右侧（纯图标，不单独占行） */
+  .theme-toggle{margin-left:auto;width:34px;height:34px;padding:0;display:flex;align-items:center;justify-content:center;background:var(--panel);border:1px solid var(--border);color:var(--fg);border-radius:999px;cursor:pointer;font-size:15px;box-shadow:var(--shadow);transition:border-color .15s,transform .15s;flex-shrink:0}
+  .theme-toggle:hover{border-color:var(--accent);transform:translateY(-1px)}
+  .theme-toggle:active{transform:translateY(0)}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+  .table-scroll{overflow-x:auto}
   table{width:100%;border-collapse:collapse;font-size:13px}
-  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--border)}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
   th{color:var(--muted);font-weight:600}
-  .badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:12px}
+  .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px}
   .badge.ok{background:var(--ok-bg);color:var(--ok-fg)}
   .badge.err{background:var(--err-bg);color:var(--err-fg)}
   .badge.warn{background:var(--warn-bg);color:var(--warn-fg)}
-  .btn{background:var(--green);color:#fff;border:none;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px}
-  .btn:hover{background:var(--green-h)}
+  /* 按钮：胶囊 */
+  .btn{background:var(--green);color:#fff;border:none;padding:8px 18px;border-radius:999px;cursor:pointer;font-size:13px;transition:filter .15s,transform .15s,box-shadow .15s}
+  .btn:hover{filter:brightness(1.08);transform:translateY(-1px);box-shadow:0 3px 10px rgba(0,0,0,.15)}
+  .btn:active{transform:translateY(0)}
   .btn.ghost{background:transparent;border:1px solid var(--border);color:var(--nav)}
+  .btn.ghost:hover{background:var(--nav-hover);color:var(--fg);filter:none}
   .btn.danger{background:var(--danger)}
   .form-row{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap}
   .form-row label{font-size:12px;color:var(--muted);display:block;margin-bottom:4px}
-  .form-row input,.form-row select{flex:1;min-width:160px;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:8px 10px;border-radius:6px}
-  .conn-card{border:1px solid var(--border);border-radius:12px;padding:18px;background:var(--panel)}
-  .conn-card .row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)}
+  .form-row input,.form-row select{flex:1;min-width:160px;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:8px 12px;border-radius:10px;transition:border-color .15s,box-shadow .15s}
+  .form-row input:focus,.form-row select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--active-bg)}
+  .conn-card{border:1px solid var(--border);border-radius:14px;padding:18px;background:var(--panel)}
+  .conn-card .row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);flex-wrap:wrap;gap:6px}
   .conn-card .row:last-child{border-bottom:none}
-  .conn-card code{background:var(--input-bg);padding:4px 8px;border-radius:6px;font-family:ui-monospace,Menlo,monospace;font-size:12px}
+  .conn-card code{background:var(--input-bg);padding:4px 10px;border-radius:999px;font-family:ui-monospace,Menlo,monospace;font-size:12px}
   .copy{cursor:pointer;color:var(--accent);font-size:12px;margin-left:8px}
-  .toast{position:fixed;top:20px;right:20px;background:var(--panel);border:1px solid var(--border);padding:12px 18px;border-radius:8px;z-index:99;display:none}
-  .toast.show{display:block}
-  pre{background:var(--pre-bg);padding:14px;border-radius:8px;overflow:auto;font-size:12px;color:var(--pre-fg)}
+  .toast{position:fixed;top:64px;right:16px;background:var(--panel);border:1px solid var(--border);padding:10px 18px;border-radius:999px;z-index:99;display:none;box-shadow:0 4px 16px rgba(0,0,0,.18)}
+  .toast.show{display:block;animation:toastIn .2s ease}
+  @keyframes toastIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+  pre{background:var(--pre-bg);padding:14px;border-radius:12px;overflow:auto;font-size:12px;color:var(--pre-fg)}
   .modal{position:fixed;inset:0;background:var(--overlay);display:none;align-items:center;justify-content:center;z-index:100}
   .modal.show{display:flex}
-  .modal .box{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:24px;width:440px;max-width:90vw}
+  .modal .box{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:24px;width:440px;max-width:90vw;box-shadow:0 12px 40px rgba(0,0,0,.3);max-height:88vh;overflow-y:auto}
   .modal h3{margin-bottom:16px}
-  .bar{height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin-top:4px}
-  .bar>span{display:block;height:100%;background:var(--accent);border-radius:3px}
+  .bar{height:6px;background:var(--border);border-radius:999px;overflow:hidden;margin-top:4px}
+  .bar>span{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--green));border-radius:999px;transition:width .4s}
   .hidden{display:none!important}
+  .nav-overlay{display:none}
+  .login-box{max-width:380px;margin:80px auto;background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:32px;box-shadow:0 8px 30px rgba(0,0,0,.12)}
+  /* ---- 响应式：移动端 ---- */
+  @media (max-width:768px){
+    .layout{display:block}
+    .sidebar{position:fixed;top:52px;left:0;width:264px;max-width:84vw;height:calc(100vh - 52px);border-right:1px solid var(--border);border-bottom:none;padding:14px 12px;background:var(--panel);transform:translateX(-106%);transition:transform .25s ease;box-shadow:0 6px 28px rgba(0,0,0,.4);z-index:70}
+    .sidebar.open{transform:translateX(0)}
+    .brand{padding:4px 10px 12px;border-bottom:1px solid var(--border);margin-bottom:10px}
+    .brand h1{font-size:16px}
+    /* 固定顶栏：汉堡 + 当前页标题 + 主题按钮 同行，z80 常驻最上层 */
+    .appbar{display:flex;align-items:center;gap:10px;position:fixed;top:0;left:0;right:0;height:52px;padding:0 12px;background:var(--panel);border-bottom:1px solid var(--border);z-index:80}
+    .appbar-title{flex:1;min-width:0;font-size:16px;font-weight:700;color:var(--accent);letter-spacing:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .sidebar .theme-toggle{display:none}
+    .nav-toggle{display:inline-flex;margin-right:0;position:static;border-radius:12px}
+    .nav{display:block;padding:4px 2px}
+    .nav a{display:block;padding:9px 14px;margin:2px 0;font-size:14px;white-space:nowrap}
+    .nav-overlay{position:fixed;inset:0;background:var(--overlay);z-index:65;display:none}
+    .nav-overlay.show{display:block}
+    .main{padding:64px 14px 24px}
+    .topbar{flex-wrap:wrap}
+    .topbar h2{font-size:17px}
+    .panel{padding:15px}
+    .cards{gap:12px}
+    .grid2{grid-template-columns:1fr;gap:16px}
+    .modal .box{width:94vw;max-width:94vw;padding:18px}
+    .toast{top:auto;bottom:20px;right:14px;left:14px;text-align:center}
+    pre{font-size:11px}
+    .login-box{margin:52px auto;padding:24px}
+  }
 </style></head>
 <body>
+<div class="appbar" id="appbar">
+  <button class="nav-toggle" id="navToggle" aria-label="打开菜单"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg></button>
+  <span class="appbar-title" id="appbarTitle">iRouter</span>
+  <button class="theme-toggle" id="themeToggleM" onclick="toggleTheme()">🌙</button>
+</div>
 <div class="layout">
   <aside class="sidebar">
-    <div class="brand"><h1>iRouter</h1><small>智能路由网关 v3.2.0</small></div>
-    <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙 暗色模式</button>
+    <div class="brand"><div class="brand-text"><h1>iRouter<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button></h1><small>智能路由网关 v3.2.0</small></div></div>
     <nav class="nav">
       <a href="#dashboard" class="active" data-view="dashboard">🏠 首页</a>
       <a href="#providers" data-view="providers">⚙️ 供应商</a>
@@ -618,11 +671,12 @@ const ADMIN_HTML = `<!DOCTYPE html>
       <a href="#keys" data-view="keys">🔑 API Keys</a>
       <a href="#settings" data-view="settings">⚡ 调用信息</a>
       <a href="#guide" data-view="guide">❔ 使用指南</a>
-      <a href="#" id="logout">🚪 退出</a>
+      <a href="#" id="logout"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 2v10"></path><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path></svg>&nbsp;退出</a>
     </nav>
   </aside>
   <main class="main" id="view"></main>
 </div>
+<div class="nav-overlay" id="navOverlay"></div>
 <div class="toast" id="toast"></div>
 <div class="modal" id="modal"><div class="box" id="modal-box"></div></div>
 
@@ -630,8 +684,11 @@ const ADMIN_HTML = `<!DOCTYPE html>
 // ============ 亮色/暗色主题切换（localStorage 记忆）============
 function applyTheme(t){
   document.documentElement.setAttribute('data-theme', t);
+  var icon = (t==='light' ? '☀️' : '🌙');
   var b=document.getElementById('themeToggle');
-  if(b) b.textContent = (t==='light' ? '☀️ 亮色模式' : '🌙 暗色模式');
+  if(b) b.textContent = icon;
+  var bm=document.getElementById('themeToggleM');
+  if(bm) bm.textContent = icon;
 }
 window.toggleTheme=function(){
   var cur=document.documentElement.getAttribute('data-theme')==='light'?'dark':'light';
@@ -684,6 +741,8 @@ function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){retur
 function render(){
   var v = currentView;
   document.title = (TITLES[v]||'') + ' · iRouter';
+  var ab = document.getElementById('appbar');
+  if(ab) ab.style.display='';
   var main = document.getElementById('view');
   if(v==='dashboard') return render_dashboard(main);
   if(v==='providers') return render_providers(main);
@@ -701,7 +760,7 @@ function render_dashboard(main){
     +   '<div class="panel"><h3>📊 模型调用排行</h3><div id="ranking"></div></div>'
     +   '<div class="panel"><h3>🏥 供应商健康度</h3><div id="health"></div></div>'
     + '</div>'
-    + '<div class="panel"><h3>🕐 最近请求</h3><table id="recent"><thead><tr><th>时间</th><th>模型</th><th>供应商</th><th>状态</th><th>延迟</th></tr></thead><tbody></tbody></table></div>'
+    + '<div class="panel"><h3>🕐 最近请求</h3><div class="table-scroll"><table id="recent"><thead><tr><th>时间</th><th>模型</th><th>供应商</th><th>状态</th><th>延迟</th></tr></thead><tbody></tbody></table></div></div>'
     + '<div id="guide-mount"></div>';
   fetchDashboard();
 }
@@ -736,9 +795,9 @@ function render_ranking(list){
   if(!el) return;
   if(!list.length){el.innerHTML='<p style="color:var(--muted);font-size:13px">暂无请求数据，发一次请求后此处会显示排行</p>';return;}
   var max = Math.max.apply(null,list.map(function(x){return x.count;}));
-  el.innerHTML = '<table><thead><tr><th>模型</th><th>调用次数</th></tr></thead><tbody>'
+  el.innerHTML = '<div class="table-scroll"><table><thead><tr><th>模型</th><th>调用次数</th></tr></thead><tbody>'
     + list.map(function(x){return '<tr><td>'+esc(x.model)+'</td><td><div class="bar"><span style="width:'+(x.count/max*100)+'%"></span></div>'+x.count+'</td></tr>';}).join('')
-    + '</tbody></table>';
+    + '</tbody></table></div>';
 }
 
 function render_health(list){
@@ -817,7 +876,7 @@ window.copyText = function(id){var el=document.getElementById(id);var txt=el.tex
 // ---- 供应商 ----
 function render_providers(main){
   main.innerHTML = '<div class="topbar"><h2>⚙️ 供应商</h2><button class="btn" onclick="openProvider()">＋ 添加供应商</button></div>'
-    + '<div class="panel"><table><thead><tr><th>名称</th><th>标识</th><th>Base URL</th><th>协议</th><th>状态</th><th>操作</th></tr></thead><tbody id="prov-tbody"></tbody></table></div>';
+    + '<div class="panel"><div class="table-scroll"><table><thead><tr><th>名称</th><th>标识</th><th>Base URL</th><th>协议</th><th>状态</th><th>操作</th></tr></thead><tbody id="prov-tbody"></tbody></table></div></div>';
   api('GET','/admin/api/providers').then(function(d){state.providers=d.data||d;render_prov_table();}).catch(function(e){toast(e&&e.error||e);});
 }
 function render_prov_table(){
@@ -844,7 +903,7 @@ window.deleteProvider=function(id){if(!confirm('确认删除？'))return;api('DE
 // ---- 路由规则 ----
 function render_routes(main){
   main.innerHTML='<div class="topbar"><h2>🔀 路由规则</h2><button class="btn" onclick="openRoute()">＋ 添加规则</button></div>'
-    +'<div class="panel"><table><thead><tr><th>名称</th><th>匹配模式</th><th>命中供应商</th><th>兜底</th><th>优先级</th><th>操作</th></tr></thead><tbody id="rt-tbody"></tbody></table></div>';
+    + '<div class="panel"><div class="table-scroll"><table><thead><tr><th>名称</th><th>匹配模式</th><th>命中供应商</th><th>兜底</th><th>优先级</th><th>操作</th></tr></thead><tbody id="rt-tbody"></tbody></table></div></div>';
   api('GET','/admin/api/routes').then(function(d){state.routes=d.data||d;render_route_table();}).catch(function(e){toast(e&&e.error||e);});
 }
 function render_route_table(){
@@ -874,7 +933,7 @@ window.deleteRoute=function(id){if(!confirm('确认删除？'))return;api('DELET
 // ---- Keys ----
 function render_keys(main){
   main.innerHTML='<div class="topbar"><h2>🔑 API Keys</h2><button class="btn" onclick="openKey()">＋ 添加 Key</button></div>'
-    +'<div class="panel"><table><thead><tr><th>名称</th><th>供应商</th><th>掩码</th><th>操作</th></tr></thead><tbody id="key-tbody"></tbody></table></div>';
+    + '<div class="panel"><div class="table-scroll"><table><thead><tr><th>名称</th><th>供应商</th><th>掩码</th><th>操作</th></tr></thead><tbody id="key-tbody"></tbody></table></div></div>';
   api('GET','/admin/api/keys').then(function(d){state.keys=d.data||d;render_key_table();}).catch(function(e){toast(e&&e.error||e);});
 }
 function render_key_table(){
@@ -909,12 +968,12 @@ function render_guide_mini(){
 function render_guide_content(el, mini){
   if(!el) return;
   var steps = [
-    {t:'① 部署完成',d:'访问「健康检查」<code>/health</code> 应返回 <code>{"ok":true,"storage":"d1"}</code>；后台各页面能正常显示数据即说明 D1 绑定正常。'},
-    {t:'② 添加供应商',d:'「供应商」页 → ＋ 添加，填写名称、标识、Base URL、协议（openai/anthropic/gemini）。'},
-    {t:'③ 配置 Key',d:'「API Keys」页 → 添加真实 Key（AES-GCM 加密存储，仅你可见）。'},
-    {t:'④ 设置路由规则',d:'「路由规则」页 → ＋ 添加，pattern 支持 <code>*</code> 通配，命中后按供应商列表顺序尝试 + 兜底。'},
-    {t:'⑤ 验证转发',d:'复制下方「调用信息」卡的 curl 示例，或直接 POST <code>/v1/chat/completions</code>，Header 带 <code>Authorization: Bearer &lt;API_TOKEN&gt;</code>。'},
-    {t:'⑥ 监控',d:'回到「首页」看模型排行 / 供应商健康度 / 最近请求。'},
+    {t:'部署完成',d:'访问「健康检查」<code>/health</code> 应返回 <code>{"ok":true,"storage":"d1"}</code>；后台各页面能正常显示数据即说明 D1 绑定正常。'},
+    {t:'添加供应商',d:'「供应商」页 → ＋ 添加，填写名称、标识、Base URL、协议（openai/anthropic/gemini）。'},
+    {t:'配置 Key',d:'「API Keys」页 → 添加真实 Key（AES-GCM 加密存储，仅你可见）。'},
+    {t:'设置路由规则',d:'「路由规则」页 → ＋ 添加，pattern 支持 <code>*</code> 通配，命中后按供应商列表顺序尝试 + 兜底。'},
+    {t:'验证转发',d:'复制下方「调用信息」卡的 curl 示例，或直接 POST <code>/v1/chat/completions</code>，Header 带 <code>Authorization: Bearer &lt;API_TOKEN&gt;</code>。'},
+    {t:'监控',d:'回到「首页」看模型排行 / 供应商健康度 / 最近请求。'},
   ];
   el.innerHTML='<ol style="padding-left:20px">'+
     steps.map(function(s,idx){return '<li style="margin-bottom:12px"><b>'+s.t+'</b><br><span style="color:var(--nav);font-size:13px">'+s.d+'</span></li>';}).join('')+
@@ -925,11 +984,13 @@ function render_guide_content(el, mini){
 
 // ---- 登录 ----
 function render_login(){
-  document.getElementById('view').innerHTML='<div style="max-width:360px;margin:80px auto;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:32px">'
+  var ab = document.getElementById('appbar');
+  if(ab) ab.style.display='none';
+  document.getElementById('view').innerHTML='<div class="login-box">'
     +'<h2 style="text-align:center;margin-bottom:24px">🔐 iRouter 管理后台</h2>'
     +'<label style="font-size:12px;color:var(--muted)">管理员密码</label>'
-    +'<input id="login-pass" type="password" style="width:100%;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:10px;border-radius:6px;margin:8px 0 16px" placeholder="请输入密码">'
-    +'<button class="btn" style="width:100%;padding:10px" onclick="doLogin()">登录</button>'
+    +'<input id="login-pass" type="password" style="width:100%;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:10px;border-radius:10px;margin:8px 0 16px" placeholder="请输入密码">'
+    +'<button class="btn" style="width:100%;padding:11px" onclick="doLogin()">登录</button>'
     +'<p style="font-size:11px;color:var(--muted);margin-top:16px;text-align:center">默认密码见环境变量 DEFAULT_ADMIN_PASS</p></div>';
 }
 window.doLogin=function(){api('POST','/admin/api/login',{password:document.getElementById('login-pass').value}).then(function(){toast('✅ 登录成功');render();}).catch(function(e){toast('❌ '+(e&&e.error||'登录失败'));});};
@@ -939,10 +1000,12 @@ function setModal(html){document.getElementById('modal-box').innerHTML=html+'<di
 window.closeModal=function(){document.getElementById('modal').className='modal';};
 
 // ============ 导航 + 自动刷新 ============
+document.getElementById('navToggle').onclick=function(){var n=document.getElementById('navToggle');document.querySelector('.sidebar').classList.toggle('open');document.getElementById('navOverlay').classList.toggle('show');n.classList.toggle('open');};
+document.getElementById('navOverlay').onclick=function(){document.querySelector('.sidebar').classList.remove('open');this.classList.remove('show');document.getElementById('navToggle').classList.remove('open');};
 document.querySelectorAll('.nav a[data-view]').forEach(function(a){
-  a.onclick=function(e){e.preventDefault();document.querySelectorAll('.nav a').forEach(function(x){x.classList.remove('active');});a.classList.add('active');currentView=a.dataset.view;location.hash='#'+a.dataset.view;render();};
+  a.onclick=function(e){e.preventDefault();document.querySelectorAll('.nav a').forEach(function(x){x.classList.remove('active');});a.classList.add('active');currentView=a.dataset.view;location.hash='#'+a.dataset.view;document.querySelector('.sidebar').classList.remove('open');document.getElementById('navOverlay').classList.remove('show');document.getElementById('navToggle').classList.remove('open');render();};
 });
-document.getElementById('logout').onclick=function(e){e.preventDefault();document.cookie='irouter_sid=; Max-Age=0; Path=/';toast('已退出');render_login();};
+document.getElementById('logout').onclick=function(e){e.preventDefault();document.querySelector('.sidebar').classList.remove('open');document.getElementById('navOverlay').classList.remove('show');document.getElementById('navToggle').classList.remove('open');document.cookie='irouter_sid=; Max-Age=0; Path=/';toast('已退出');render_login();};
 window.onhashchange=function(){var v=location.hash.replace('#','');if(TITLES[v]){currentView=v;render();}};
 
 // 30 秒自动刷新（页面可见时才请求，节省额度）
