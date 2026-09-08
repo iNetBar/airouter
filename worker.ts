@@ -432,7 +432,7 @@ export default {
         app.get('/admin/api/keys', async (c) => {
             if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
             const keys = await db.getKeys(env.DB);
-            return c.json(keys.map(k => ({ ...k, secret: '' })));   // 列表不返回密文
+            return c.json({ ok: true, data: keys.map(k => ({ ...k, secret: '' })), encryptReady: !!env.ENCRYPT_KEY });   // 列表不返回密文，附带加密能力状态
         });
         app.post('/admin/api/keys', async (c) => {
             if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
@@ -594,10 +594,13 @@ const ADMIN_HTML = `<!DOCTYPE html>
   table{width:100%;border-collapse:collapse;font-size:13px}
   th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
   th{color:var(--muted);font-weight:600}
+  td code{font-size:inherit;font-family:ui-monospace,Menlo,monospace}
   .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px}
   .badge.ok{background:var(--ok-bg);color:var(--ok-fg)}
   .badge.err{background:var(--err-bg);color:var(--err-fg)}
   .badge.warn{background:var(--warn-bg);color:var(--warn-fg)}
+  .badge.info{background:var(--active-bg);color:var(--accent)}
+  .badge.plain{background:var(--input-bg);color:var(--muted)}
   /* 按钮：胶囊 */
   .btn{background:var(--green);color:#fff;border:none;padding:8px 18px;border-radius:999px;cursor:pointer;font-size:13px;transition:filter .15s,transform .15s,box-shadow .15s}
   .btn:hover{filter:brightness(1.08);transform:translateY(-1px);box-shadow:0 3px 10px rgba(0,0,0,.15)}
@@ -833,10 +836,14 @@ function render_settings(main){
   }).catch(function(e){ toast('加载失败：'+(e&&e.error||e)); });
 }
 
+function gwBase(raw){
+  var b=String(raw||location.origin||'').replace(/\\/+$/,'');
+  return /\\/v1$/i.test(b)?b:b+'/v1';
+}
 function render_conn(s){
-  var baseUrl = s.baseUrl || (location.origin || '');
+  var baseUrl = gwBase(s.baseUrl);
   var token = s.apiToken || '（未设置，请在下方设置 API_TOKEN）';
-  var curl = 'curl -X POST "'+baseUrl+'/v1/chat/completions" \\\\\\n'
+  var curl = 'curl -X POST "'+baseUrl+'/chat/completions" \\\\\\n'
            + '  -H "Authorization: Bearer '+esc(s.apiToken||'YOUR_TOKEN')+'" \\\\\\n'
            + '  -H "Content-Type: application/json" \\\\\\n'
            + '  -d \\'{ "model": "gpt-4o-mini", "messages": [{"role":"user","content":"hello"}] }\\'';
@@ -852,7 +859,7 @@ function row_html(k,v){return '<div class="row"><div><div style="font-size:12px;
 function render_settings_form(s){
   document.getElementById('settings-form').innerHTML = ''
     + '<div class="form-row"><div style="flex:1"><label>项目名</label><input id="f-project" value="'+esc(s.projectName||'iRouter')+'"></div>'
-    + '<div style="flex:1"><label>网关 Base URL（留空=自动取当前域名）</label><input id="f-base" value="'+esc(s.baseUrl||'')+'" placeholder="https://irouter.example.com"></div></div>'
+    + '<div style="flex:1"><label>网关 Base URL（留空=自动取当前域名并补 /v1）</label><input id="f-base" value="'+esc(s.baseUrl||'')+'" placeholder="https://irouter.pages.dev"></div></div>'
     + '<div class="form-row"><div style="flex:1"><label>调用 Token（留空=不修改；≥8 位可更新；与登录密码相互独立）</label><input id="f-token" type="password" placeholder="sk-xxxxxxxx（留空则不修改）"></div></div>'
     + '<button class="btn" onclick="saveSettings()">💾 保存</button>'
     + '<span style="margin-left:12px;font-size:12px;color:var(--muted)">提示：此 Token 是「外部调用网关」用的鉴权 key，与管理员登录密码是两套，互不影响</span>';
@@ -876,17 +883,18 @@ window.copyText = function(id){var el=document.getElementById(id);var txt=el.tex
 // ---- 供应商 ----
 function render_providers(main){
   main.innerHTML = '<div class="topbar"><h2>⚙️ 供应商</h2><button class="btn" onclick="openProvider()">＋ 添加供应商</button></div>'
-    + '<div class="panel"><div class="table-scroll"><table><thead><tr><th>名称</th><th>标识</th><th>Base URL</th><th>协议</th><th>状态</th><th>操作</th></tr></thead><tbody id="prov-tbody"></tbody></table></div></div>';
+    + '<div class="panel"><div class="table-scroll"><table><thead><tr><th>名称</th><th>标识</th><th>Base URL</th><th>协议</th><th>内置</th><th>状态</th><th>操作</th></tr></thead><tbody id="prov-tbody"></tbody></table></div></div>';
   api('GET','/admin/api/providers').then(function(d){state.providers=d.data||d;render_prov_table();}).catch(function(e){toast(e&&e.error||e);});
 }
 function render_prov_table(){
   var tb=document.getElementById('prov-tbody');
   tb.innerHTML=state.providers.map(function(p){
-    return '<tr><td>'+esc(p.name)+'</td><td><code>'+esc(p.id)+'</code></td><td><code style="font-size:11px">'+esc(p.base_url)+'</code></td><td>'+esc(p.protocol)+'</td>'
-      + '<td>'+(p.enabled?'<span class="badge ok">启用</span>':'<span class="badge err">停用</span>')+'</td>'
+    return '<tr><td>'+esc(p.name)+'</td><td><code>'+esc(p.id)+'</code></td><td><code>'+esc(p.base_url)+'</code></td><td>'+esc(p.protocol)+'</td>'
+      + '<td><span class="badge '+(p.builtin?'info':'plain')+'">'+(p.builtin?'内置':'自定义')+'</span></td>'
+      + '<td><span class="badge '+(p.enabled?'ok':'err')+'" style="cursor:pointer" onclick="toggleProvider(\\''+esc(p.id)+'\\')" title="点击切换状态">'+(p.enabled?'启用':'停用')+'</span></td>'
       + '<td><button class="btn ghost" onclick="editProvider(\\''+esc(p.id)+'\\')">编辑</button> '
-      + (p.builtin?'<span style="font-size:11px;color:var(--muted)">内置</span>':'<button class="btn danger" onclick="deleteProvider(\\''+esc(p.id)+'\\')">删除</button>')+'</td></tr>';
-  }).join('');
+      + (p.builtin?'':'<button class="btn danger" onclick="deleteProvider(\\''+esc(p.id)+'\\')">删除</button>')+'</td></tr>';
+  }).join('')||'<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px">暂无供应商</td></tr>';
 }
 window.openProvider=function(){setModal('<h3>添加供应商</h3>'
   +'<div class="form-row"><div style="flex:1"><label>名称</label><input id="m-name"></div><div style="flex:1"><label>标识（唯一 ID）</label><input id="m-id" placeholder="my-provider"></div></div>'
@@ -899,6 +907,7 @@ window.editProvider=function(id){var p=state.providers.find(function(x){return x
   +'<button class="btn" onclick="submitEditProvider(\\''+esc(id)+'\\')">保存</button>');};
 window.submitEditProvider=function(id){api('PUT','/admin/api/providers/'+id,{name:document.getElementById('m-name').value,base_url:document.getElementById('m-url').value,enabled:document.getElementById('m-enabled').value==='1'}).then(function(){closeModal();render_providers(document.getElementById('view'));toast('✅ 已更新');});};
 window.deleteProvider=function(id){if(!confirm('确认删除？'))return;api('DELETE','/admin/api/providers/'+id).then(function(){render_providers(document.getElementById('view'));toast('🗑️ 已删除');});};
+window.toggleProvider=function(id){var p=state.providers.find(function(x){return x.id===id;});if(!p)return;api('PUT','/admin/api/providers/'+id,{enabled:!p.enabled}).then(function(){render_providers(document.getElementById('view'));toast(p.enabled?'✅ 已停用':'✅ 已启用');}).catch(function(e){toast('切换失败：'+(e&&e.error||e));});};
 
 // ---- 路由规则 ----
 function render_routes(main){
@@ -911,8 +920,8 @@ function render_route_table(){
   tb.innerHTML=state.routes.map(function(r){
     return '<tr><td>'+esc(r.name||'(未命名)')+'</td><td><code>'+esc(r.pattern)+'</code></td>'
       +'<td>'+(r.providers||[]).map(esc).join(' → ')+'</td>'
-      +'<td>'+(r.fallback||[]).map(esc).join(' → ')||'<span style="color:var(--muted)">-</span>'+
-      '</td><td>'+(r.priority||0)+'</td>'
+      +'<td>'+((r.fallback||[]).map(esc).join(' → ')||'<span style="color:var(--muted)">-</span>')+'</td>'
+      +'<td>'+(r.priority||0)+'</td>'
       +'<td><button class="btn ghost" onclick="editRoute(\\''+esc(r.id)+'\\')">编辑</button> <button class="btn danger" onclick="deleteRoute(\\''+esc(r.id)+'\\')">删除</button></td></tr>';
   }).join('');
 }
@@ -933,8 +942,17 @@ window.deleteRoute=function(id){if(!confirm('确认删除？'))return;api('DELET
 // ---- Keys ----
 function render_keys(main){
   main.innerHTML='<div class="topbar"><h2>🔑 API Keys</h2><button class="btn" onclick="openKey()">＋ 添加 Key</button></div>'
+    + '<div id="enc-warn" class="hidden"></div>'
     + '<div class="panel"><div class="table-scroll"><table><thead><tr><th>名称</th><th>供应商</th><th>掩码</th><th>操作</th></tr></thead><tbody id="key-tbody"></tbody></table></div></div>';
-  api('GET','/admin/api/keys').then(function(d){state.keys=d.data||d;render_key_table();}).catch(function(e){toast(e&&e.error||e);});
+  api('GET','/admin/api/keys').then(function(d){
+    state.keys=d.data||d;
+    var w=document.getElementById('enc-warn');
+    if(w && d.encryptReady===false){
+      w.className='';
+      w.innerHTML='<div style="background:var(--warn-bg);color:var(--warn-fg);border:1px solid var(--border);border-radius:12px;padding:10px 14px;margin-bottom:14px;font-size:13px">⚠️ <b>ENCRYPT_KEY 未配置</b>：当前无法加密保存 API Key。请先在 Cloudflare 控制台给本项目设置 <code>ENCRYPT_KEY</code>（任意长随机串）并重新部署后，再添加 Key。</div>';
+    }
+    render_key_table();
+  }).catch(function(e){toast(e&&e.error||e);});
 }
 function render_key_table(){
   var tb=document.getElementById('key-tbody');
@@ -947,7 +965,7 @@ window.openKey=function(){var opts=state.providers.map(function(p){return '<opti
   +'<div class="form-row"><div style="flex:1"><label>名称</label><input id="k-name"></div><div style="flex:1"><label>所属供应商</label><select id="k-prov">'+opts+'</select></div></div>'
   +'<div class="form-row"><div style="flex:1"><label>真实 Key（AES-GCM 加密存储，仅你可见）</label><input id="k-secret" type="password" placeholder="sk-..."></div></div>'
   +'<button class="btn" onclick="submitKey()">保存</button>');};
-window.submitKey=function(){api('POST','/admin/api/keys',{name:document.getElementById('k-name').value,provider_id:document.getElementById('k-prov').value,secret:document.getElementById('k-secret').value}).then(function(){closeModal();render_keys(document.getElementById('view'));toast('✅ 已添加');});};
+window.submitKey=function(){api('POST','/admin/api/keys',{name:document.getElementById('k-name').value,provider_id:document.getElementById('k-prov').value,secret:document.getElementById('k-secret').value}).then(function(){closeModal();render_keys(document.getElementById('view'));toast('✅ 已添加');}).catch(function(e){var msg=(e&&e.error)||'保存失败';toast('❌ '+msg);setModal('<h3>保存失败</h3><p style="color:var(--danger)">'+esc(msg)+'</p><p style="font-size:12px;color:var(--muted);margin-top:8px">提示：添加 API Key 需要先配置 ENCRYPT_KEY（Cloudflare 控制台 → 本项目 → 设置 → 环境变量），配置后重新部署再添加。</p>');});};
 window.deleteKey=function(id){if(!confirm('确认删除？删除后该 Key 无法再用于转发'))return;api('DELETE','/admin/api/keys/'+id).then(function(){render_keys(document.getElementById('view'));toast('🗑️ 已删除');});};
 
 // ---- 使用指南 ----

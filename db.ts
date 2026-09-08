@@ -36,9 +36,11 @@ const cache: { providers?: { data: Provider[]; at: number }; routes?: { data: Ro
 function expired(at?: number) { return !at || Date.now() - at > CACHE_TTL; }
 
 // ---------- 底层 helpers ----------
-function jget<T = unknown>(row: { v: string } | null, fallback: T): T {
-    if (!row) return fallback;
-    try { return JSON.parse(row.v) as T; } catch { return fallback; }
+function jget<T = unknown>(row: string | { v: string } | null, fallback: T): T {
+    if (row == null) return fallback;
+    try {
+        return JSON.parse(typeof row === 'string' ? row : row.v) as T;
+    } catch { return fallback; }
 }
 
 // =====================================================================
