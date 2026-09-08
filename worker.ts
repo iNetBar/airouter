@@ -539,61 +539,78 @@ const ADMIN_HTML = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>iRouter · 管理后台</title>
 <style>
+  :root{
+    --bg:#0f1419;--fg:#e6edf3;--panel:#161b22;--border:#30363d;--muted:#8b949e;
+    --accent:#58a6ff;--input-bg:#0d1117;--nav:#c9d1d9;--nav-hover:#21262d;--active-bg:#1f6feb22;
+    --green:#238636;--green-h:#2ea043;--danger:#f85149;
+    --ok-bg:#23863633;--ok-fg:#3fb950;--err-bg:#f8514933;--err-fg:#f85149;--warn-bg:#d2992233;--warn-fg:#d29922;
+    --overlay:#0008;--pre-bg:#0d1117;--pre-fg:#a5d6ff;
+  }
+  html[data-theme="light"]{
+    --bg:#ffffff;--fg:#1f2328;--panel:#f6f8fa;--border:#d0d7de;--muted:#656d76;
+    --accent:#0969da;--input-bg:#ffffff;--nav:#57606a;--nav-hover:#eaeef2;--active-bg:#ddf4ff;
+    --green:#1f883d;--green-h:#1a7f37;--danger:#cf222e;
+    --ok-bg:#dafbe1;--ok-fg:#1a7f37;--err-bg:#ffebe9;--err-fg:#cf222e;--warn-bg:#fff8c5;--warn-fg:#9a6700;
+    --overlay:#0006;--pre-bg:#f6f8fa;--pre-fg:#0550ae;
+  }
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:#0f1419;color:#e6edf3;line-height:1.6}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--fg);line-height:1.6;transition:background .2s,color .2s}
   .layout{display:flex;min-height:100vh}
-  .sidebar{width:220px;background:#161b22;border-right:1px solid #30363d;padding:20px 0;position:sticky;top:0;height:100vh;overflow:auto}
-  .brand{padding:0 20px 20px;border-bottom:1px solid #30363d;margin-bottom:12px}
-  .brand h1{font-size:20px;color:#58a6ff;letter-spacing:1px}
-  .brand small{color:#8b949e;font-size:12px}
-  .nav a{display:block;padding:10px 20px;color:#c9d1d9;text-decoration:none;font-size:14px;border-left:3px solid transparent;transition:.15s}
-  .nav a:hover{background:#21262d;color:#fff}
-  .nav a.active{background:#1f6feb22;color:#58a6ff;border-left-color:#58a6ff}
+  .sidebar{width:220px;background:var(--panel);border-right:1px solid var(--border);padding:20px 0;position:sticky;top:0;height:100vh;overflow:auto}
+  .brand{padding:0 20px 20px;border-bottom:1px solid var(--border);margin-bottom:12px}
+  .brand h1{font-size:20px;color:var(--accent);letter-spacing:1px}
+  .brand small{color:var(--muted);font-size:12px}
+  .nav a{display:block;padding:10px 20px;color:var(--nav);text-decoration:none;font-size:14px;border-left:3px solid transparent;transition:.15s}
+  .nav a:hover{background:var(--nav-hover);color:var(--fg)}
+  .nav a.active{background:var(--active-bg);color:var(--accent);border-left-color:var(--accent)}
   .main{flex:1;padding:28px 36px;overflow:auto}
   .topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px}
   .topbar h2{font-size:20px;font-weight:600}
   .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:24px}
-  .card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px}
-  .card .label{color:#8b949e;font-size:13px;margin-bottom:6px}
-  .card .value{font-size:28px;font-weight:700;color:#58a6ff}
-  .card .sub{font-size:12px;color:#8b949e;margin-top:4px}
-  .panel{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;margin-bottom:24px}
-  .panel h3{font-size:15px;margin-bottom:14px;color:#e6edf3}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px}
+  .card .label{color:var(--muted);font-size:13px;margin-bottom:6px}
+  .card .value{font-size:28px;font-weight:700;color:var(--accent)}
+  .card .sub{font-size:12px;color:var(--muted);margin-top:4px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:24px}
+  .panel h3{font-size:15px;margin-bottom:14px;color:var(--fg)}
+  .theme-toggle{display:block;width:calc(100% - 40px);margin:12px 20px;padding:9px 0;background:transparent;border:1px solid var(--border);color:var(--nav);border-radius:6px;cursor:pointer;font-size:13px;text-align:center}
+  .theme-toggle:hover{background:var(--nav-hover);color:var(--fg)}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:24px}
   table{width:100%;border-collapse:collapse;font-size:13px}
-  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid #30363d}
-  th{color:#8b949e;font-weight:600}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--border)}
+  th{color:var(--muted);font-weight:600}
   .badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:12px}
-  .badge.ok{background:#23863633;color:#3fb950}
-  .badge.err{background:#f8514933;color:#f85149}
-  .badge.warn{background:#d2992233;color:#d29922}
-  .btn{background:#238636;color:#fff;border:none;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px}
-  .btn:hover{background:#2ea043}
-  .btn.ghost{background:transparent;border:1px solid #30363d;color:#c9d1d9}
-  .btn.danger{background:#f85149}
+  .badge.ok{background:var(--ok-bg);color:var(--ok-fg)}
+  .badge.err{background:var(--err-bg);color:var(--err-fg)}
+  .badge.warn{background:var(--warn-bg);color:var(--warn-fg)}
+  .btn{background:var(--green);color:#fff;border:none;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px}
+  .btn:hover{background:var(--green-h)}
+  .btn.ghost{background:transparent;border:1px solid var(--border);color:var(--nav)}
+  .btn.danger{background:var(--danger)}
   .form-row{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap}
-  .form-row label{font-size:12px;color:#8b949e;display:block;margin-bottom:4px}
-  .form-row input,.form-row select{flex:1;min-width:160px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:8px 10px;border-radius:6px}
-  .conn-card{border:1px solid #30363d;border-radius:12px;padding:18px;background:#161b22}
-  .conn-card .row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #30363d}
+  .form-row label{font-size:12px;color:var(--muted);display:block;margin-bottom:4px}
+  .form-row input,.form-row select{flex:1;min-width:160px;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:8px 10px;border-radius:6px}
+  .conn-card{border:1px solid var(--border);border-radius:12px;padding:18px;background:var(--panel)}
+  .conn-card .row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)}
   .conn-card .row:last-child{border-bottom:none}
-  .conn-card code{background:#0d1117;padding:4px 8px;border-radius:6px;font-family:ui-monospace,Menlo,monospace;font-size:12px}
-  .copy{cursor:pointer;color:#58a6ff;font-size:12px;margin-left:8px}
-  .toast{position:fixed;top:20px;right:20px;background:#161b22;border:1px solid #30363d;padding:12px 18px;border-radius:8px;z-index:99;display:none}
+  .conn-card code{background:var(--input-bg);padding:4px 8px;border-radius:6px;font-family:ui-monospace,Menlo,monospace;font-size:12px}
+  .copy{cursor:pointer;color:var(--accent);font-size:12px;margin-left:8px}
+  .toast{position:fixed;top:20px;right:20px;background:var(--panel);border:1px solid var(--border);padding:12px 18px;border-radius:8px;z-index:99;display:none}
   .toast.show{display:block}
-  pre{background:#0d1117;padding:14px;border-radius:8px;overflow:auto;font-size:12px;color:#a5d6ff}
-  .modal{position:fixed;inset:0;background:#0008;display:none;align-items:center;justify-content:center;z-index:100}
+  pre{background:var(--pre-bg);padding:14px;border-radius:8px;overflow:auto;font-size:12px;color:var(--pre-fg)}
+  .modal{position:fixed;inset:0;background:var(--overlay);display:none;align-items:center;justify-content:center;z-index:100}
   .modal.show{display:flex}
-  .modal .box{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px;width:440px;max-width:90vw}
+  .modal .box{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:24px;width:440px;max-width:90vw}
   .modal h3{margin-bottom:16px}
-  .bar{height:6px;background:#30363d;border-radius:3px;overflow:hidden;margin-top:4px}
-  .bar>span{display:block;height:100%;background:#58a6ff;border-radius:3px}
+  .bar{height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin-top:4px}
+  .bar>span{display:block;height:100%;background:var(--accent);border-radius:3px}
   .hidden{display:none!important}
 </style></head>
 <body>
 <div class="layout">
   <aside class="sidebar">
     <div class="brand"><h1>iRouter</h1><small>智能路由网关 v3.2.0</small></div>
+    <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙 暗色模式</button>
     <nav class="nav">
       <a href="#dashboard" class="active" data-view="dashboard">🏠 首页</a>
       <a href="#providers" data-view="providers">⚙️ 供应商</a>
@@ -610,6 +627,21 @@ const ADMIN_HTML = `<!DOCTYPE html>
 <div class="modal" id="modal"><div class="box" id="modal-box"></div></div>
 
 <script>
+// ============ 亮色/暗色主题切换（localStorage 记忆）============
+function applyTheme(t){
+  document.documentElement.setAttribute('data-theme', t);
+  var b=document.getElementById('themeToggle');
+  if(b) b.textContent = (t==='light' ? '☀️ 亮色模式' : '🌙 暗色模式');
+}
+window.toggleTheme=function(){
+  var cur=document.documentElement.getAttribute('data-theme')==='light'?'dark':'light';
+  localStorage.setItem('irouter_theme', cur);
+  applyTheme(cur);
+};
+(function(){
+  var saved=localStorage.getItem('irouter_theme')||'dark';
+  applyTheme(saved);
+})();
 // ============ api()：URL 归一化（根治 /admin/apiGET 与双拼 404）============
 window.api = function(method, path, body){
   var m, p, b;
@@ -702,7 +734,7 @@ function card(label,value,sub){return '<div class="card"><div class="label">'+la
 function render_ranking(list){
   var el = document.getElementById('ranking');
   if(!el) return;
-  if(!list.length){el.innerHTML='<p style="color:#8b949e;font-size:13px">暂无请求数据，发一次请求后此处会显示排行</p>';return;}
+  if(!list.length){el.innerHTML='<p style="color:var(--muted);font-size:13px">暂无请求数据，发一次请求后此处会显示排行</p>';return;}
   var max = Math.max.apply(null,list.map(function(x){return x.count;}));
   el.innerHTML = '<table><thead><tr><th>模型</th><th>调用次数</th></tr></thead><tbody>'
     + list.map(function(x){return '<tr><td>'+esc(x.model)+'</td><td><div class="bar"><span style="width:'+(x.count/max*100)+'%"></span></div>'+x.count+'</td></tr>';}).join('')
@@ -714,8 +746,8 @@ function render_health(list){
   if(!el) return;
   el.innerHTML = list.map(function(p){
     var color = p.successRate>=90?'ok':p.successRate>=60?'warn':'err';
-    return '<div style="margin-bottom:10px"><div style="display:flex;justify-content:space-between;font-size:13px"><span>'+esc(p.name)+'</span><span>'+(p.successRate||0)+'% · '+(p.avgLatency||0)+'ms</span></div><div class="bar"><span style="width:'+(p.successRate||0)+'%;background:'+(color==='ok'?'#3fb950':color==='warn'?'#d29922':'#f85149')+'"></span></div></div>';
-  }).join('') || '<p style="color:#8b949e;font-size:13px">暂无数据</p>';
+    return '<div style="margin-bottom:10px"><div style="display:flex;justify-content:space-between;font-size:13px"><span>'+esc(p.name)+'</span><span>'+(p.successRate||0)+'% · '+(p.avgLatency||0)+'ms</span></div><div class="bar"><span style="width:'+(p.successRate||0)+'%;background:'+(color==='ok'?'var(--ok-fg)':color==='warn'?'var(--warn-fg)':'var(--err-fg)')+'"></span></div></div>';
+  }).join('') || '<p style="color:var(--muted);font-size:13px">暂无数据</p>';
 }
 
 function render_recent(list){
@@ -726,7 +758,7 @@ function render_recent(list){
     var time = isNaN(d)?'':'0'.concat(d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)+':'+('0'+d.getSeconds()).slice(-2);
     var badge = r.ok?'<span class="badge ok">'+r.status+'</span>':'<span class="badge err">'+r.status+'</span>';
     return '<tr><td>'+time+'</td><td>'+esc(r.model||'-')+'</td><td>'+esc(r.provider||'-')+'</td><td>'+badge+'</td><td>'+(r.latency_ms||0)+'ms</td></tr>';
-  }).join('') || '<tr><td colspan="5" style="color:#8b949e;text-align:center;padding:20px">暂无请求记录</td></tr>';
+  }).join('') || '<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:20px">暂无请求记录</td></tr>';
 }
 
 // ---- 调用信息（总览页核心：Base URL + Token + 修改）----
@@ -753,10 +785,10 @@ function render_conn(s){
     + row_html('🏷️ 项目名', esc(s.projectName||'iRouter')+' <span class="badge ok">v3.2.0 · D1</span>')
     + row_html('🌐 网关 Base URL', '<code id="conn-url">'+esc(baseUrl)+'</code> <span class="copy" onclick="copyText(\\'conn-url\\')">📋 复制</span>')
     + row_html('🔑 调用 Token', '<code id="conn-token">'+esc(token)+'</code> <span class="copy" onclick="copyText(\\'conn-token\\')">📋 复制</span>')
-    + '<div style="margin-top:14px"><label style="font-size:12px;color:#8b949e">📦 快速调用示例（curl）</label><pre id="conn-curl">'+esc(curl)+'</pre><span class="copy" onclick="copyText(\\'conn-curl\\')">📋 复制</span></div>';
+    + '<div style="margin-top:14px"><label style="font-size:12px;color:var(--muted)">📦 快速调用示例（curl）</label><pre id="conn-curl">'+esc(curl)+'</pre><span class="copy" onclick="copyText(\\'conn-curl\\')">📋 复制</span></div>';
 }
 
-function row_html(k,v){return '<div class="row"><div><div style="font-size:12px;color:#8b949e">'+k+'</div><div style="font-size:14px;margin-top:4px">'+v+'</div></div></div>';}
+function row_html(k,v){return '<div class="row"><div><div style="font-size:12px;color:var(--muted)">'+k+'</div><div style="font-size:14px;margin-top:4px">'+v+'</div></div></div>';}
 
 function render_settings_form(s){
   document.getElementById('settings-form').innerHTML = ''
@@ -764,7 +796,7 @@ function render_settings_form(s){
     + '<div style="flex:1"><label>网关 Base URL（留空=自动取当前域名）</label><input id="f-base" value="'+esc(s.baseUrl||'')+'" placeholder="https://irouter.example.com"></div></div>'
     + '<div class="form-row"><div style="flex:1"><label>调用 Token（留空=不修改；≥8 位可更新；与登录密码相互独立）</label><input id="f-token" type="password" placeholder="sk-xxxxxxxx（留空则不修改）"></div></div>'
     + '<button class="btn" onclick="saveSettings()">💾 保存</button>'
-    + '<span style="margin-left:12px;font-size:12px;color:#8b949e">提示：此 Token 是「外部调用网关」用的鉴权 key，与管理员登录密码是两套，互不影响</span>';
+    + '<span style="margin-left:12px;font-size:12px;color:var(--muted)">提示：此 Token 是「外部调用网关」用的鉴权 key，与管理员登录密码是两套，互不影响</span>';
 }
 
 window.saveSettings = function(){
@@ -794,7 +826,7 @@ function render_prov_table(){
     return '<tr><td>'+esc(p.name)+'</td><td><code>'+esc(p.id)+'</code></td><td><code style="font-size:11px">'+esc(p.base_url)+'</code></td><td>'+esc(p.protocol)+'</td>'
       + '<td>'+(p.enabled?'<span class="badge ok">启用</span>':'<span class="badge err">停用</span>')+'</td>'
       + '<td><button class="btn ghost" onclick="editProvider(\\''+esc(p.id)+'\\')">编辑</button> '
-      + (p.builtin?'<span style="font-size:11px;color:#8b949e">内置</span>':'<button class="btn danger" onclick="deleteProvider(\\''+esc(p.id)+'\\')">删除</button>')+'</td></tr>';
+      + (p.builtin?'<span style="font-size:11px;color:var(--muted)">内置</span>':'<button class="btn danger" onclick="deleteProvider(\\''+esc(p.id)+'\\')">删除</button>')+'</td></tr>';
   }).join('');
 }
 window.openProvider=function(){setModal('<h3>添加供应商</h3>'
@@ -820,7 +852,7 @@ function render_route_table(){
   tb.innerHTML=state.routes.map(function(r){
     return '<tr><td>'+esc(r.name||'(未命名)')+'</td><td><code>'+esc(r.pattern)+'</code></td>'
       +'<td>'+(r.providers||[]).map(esc).join(' → ')+'</td>'
-      +'<td>'+(r.fallback||[]).map(esc).join(' → ')||'<span style="color:#8b949e">-</span>'+
+      +'<td>'+(r.fallback||[]).map(esc).join(' → ')||'<span style="color:var(--muted)">-</span>'+
       '</td><td>'+(r.priority||0)+'</td>'
       +'<td><button class="btn ghost" onclick="editRoute(\\''+esc(r.id)+'\\')">编辑</button> <button class="btn danger" onclick="deleteRoute(\\''+esc(r.id)+'\\')">删除</button></td></tr>';
   }).join('');
@@ -850,7 +882,7 @@ function render_key_table(){
   tb.innerHTML=state.keys.map(function(k){
     return '<tr><td>'+esc(k.name||'(未命名)')+'</td><td><code>'+esc(k.provider_id)+'</code></td><td><code>'+esc(k.masked||'****')+'</code></td>'
       +'<td><button class="btn danger" onclick="deleteKey(\\''+esc(k.id)+'\\')">删除</button></td></tr>';
-  }).join('')||'<tr><td colspan="4" style="text-align:center;color:#8b949e;padding:20px">暂无 Key，添加后供应商方可转发</td></tr>';
+  }).join('')||'<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:20px">暂无 Key，添加后供应商方可转发</td></tr>';
 }
 window.openKey=function(){var opts=state.providers.map(function(p){return '<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>';}).join('');setModal('<h3>添加 API Key</h3>'
   +'<div class="form-row"><div style="flex:1"><label>名称</label><input id="k-name"></div><div style="flex:1"><label>所属供应商</label><select id="k-prov">'+opts+'</select></div></div>'
@@ -868,7 +900,7 @@ function render_guide(main){
 function render_guide_mini(){
   var mount=document.getElementById('guide-mount');
   if(!mount) return;
-  mount.innerHTML='<div class="panel" style="border-color:#58a6ff"><h3>👋 欢迎使用 iRouter v3.2.0（Cloudflare D1 版）</h3><div id="guide-mini-body"></div><button class="btn ghost" onclick="document.getElementById(\\'guide-mount\\').innerHTML=\\'\\'">关闭</button></div>';
+  mount.innerHTML='<div class="panel" style="border-color:var(--accent)"><h3>👋 欢迎使用 iRouter v3.2.0（Cloudflare D1 版）</h3><div id="guide-mini-body"></div><button class="btn ghost" onclick="document.getElementById(\\'guide-mount\\').innerHTML=\\'\\'">关闭</button></div>';
   render_guide_content(document.getElementById('guide-mini-body'), true);
   if(!localStorage.getItem('irouter_guide_dismissed')){
     setTimeout(function(){var b=document.getElementById('guide-mini-body');if(b) render_guide_content(b,true);},50);
@@ -885,20 +917,20 @@ function render_guide_content(el, mini){
     {t:'⑥ 监控',d:'回到「首页」看模型排行 / 供应商健康度 / 最近请求。'},
   ];
   el.innerHTML='<ol style="padding-left:20px">'+
-    steps.map(function(s,idx){return '<li style="margin-bottom:12px"><b>'+s.t+'</b><br><span style="color:#c9d1d9;font-size:13px">'+s.d+'</span></li>';}).join('')+
+    steps.map(function(s,idx){return '<li style="margin-bottom:12px"><b>'+s.t+'</b><br><span style="color:var(--nav);font-size:13px">'+s.d+'</span></li>';}).join('')+
     '</ol>'+
-    (mini?'':'<p style="margin-top:16px;color:#8b949e;font-size:12px">💡 总览页的「调用信息」可随时查看 Base URL 与 Token，并支持修改（与登录密码相互独立）。</p>');
+    (mini?'':'<p style="margin-top:16px;color:var(--muted);font-size:12px">💡 总览页的「调用信息」可随时查看 Base URL 与 Token，并支持修改（与登录密码相互独立）。</p>');
   if(!mini) localStorage.setItem('irouter_guide_dismissed','1');
 }
 
 // ---- 登录 ----
 function render_login(){
-  document.getElementById('view').innerHTML='<div style="max-width:360px;margin:80px auto;background:#161b22;border:1px solid #30363d;border-radius:12px;padding:32px">'
+  document.getElementById('view').innerHTML='<div style="max-width:360px;margin:80px auto;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:32px">'
     +'<h2 style="text-align:center;margin-bottom:24px">🔐 iRouter 管理后台</h2>'
-    +'<label style="font-size:12px;color:#8b949e">管理员密码</label>'
-    +'<input id="login-pass" type="password" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:10px;border-radius:6px;margin:8px 0 16px" placeholder="请输入密码">'
+    +'<label style="font-size:12px;color:var(--muted)">管理员密码</label>'
+    +'<input id="login-pass" type="password" style="width:100%;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:10px;border-radius:6px;margin:8px 0 16px" placeholder="请输入密码">'
     +'<button class="btn" style="width:100%;padding:10px" onclick="doLogin()">登录</button>'
-    +'<p style="font-size:11px;color:#8b949e;margin-top:16px;text-align:center">默认密码见环境变量 DEFAULT_ADMIN_PASS</p></div>';
+    +'<p style="font-size:11px;color:var(--muted);margin-top:16px;text-align:center">默认密码见环境变量 DEFAULT_ADMIN_PASS</p></div>';
 }
 window.doLogin=function(){api('POST','/admin/api/login',{password:document.getElementById('login-pass').value}).then(function(){toast('✅ 登录成功');render();}).catch(function(e){toast('❌ '+(e&&e.error||'登录失败'));});};
 

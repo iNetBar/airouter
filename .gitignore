@@ -19,3 +19,6 @@ wrangler.toml.local
 *.log
 .vscode/
 .idea/
+
+# 浏览器自动化临时产物
+.dumate/
