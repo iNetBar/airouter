@@ -1,7 +1,7 @@
 name: Deploy iRouter
 
 # ============================================================
-#  iRouter v3.2.0 小白一键部署（Cloudflare Pages + D1）
+#  iRouter v3.3.0 小白一键部署（Cloudflare Pages + D1）
 #
 #  原理：GitHub Actions 全程只用官方 wrangler-action@v3，
 #       绝不裸调 `wrangler` 命令 → 杜绝 "command not found" (exit 127)

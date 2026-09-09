@@ -1,4 +1,4 @@
-// db.ts — iRouter v3.2.0 D1 存储层（替代 KV 版 storage.ts）
+// db.ts — iRouter v3.3.0 D1 存储层（替代 KV 版 storage.ts）
 // 设计原则：
 //   1. 全部 SQL 走 env.DB.prepare(...).bind(...)，参数化防注入
 //   2. 进程级内存缓存（Worker 实例内）：providers/routes/keys 读走内存，60s 过期
@@ -17,6 +17,7 @@ export interface Provider {
 export interface Route {
     id: string; name: string; pattern: string; providers: string[];
     fallback: string[]; priority: number; enabled: boolean; created_at: number;
+    model_map: Record<string, string>;   // 模型名改写：{ 请求模型名: 上游模型名 }
 }
 export interface KeyRow {
     id: string; name: string; provider_id: string; secret: string;
@@ -74,7 +75,7 @@ export async function saveProvider(db: D1Database, p: Provider): Promise<void> {
             base_url=excluded.base_url, protocol=excluded.protocol,
             headers=excluded.headers, keys=excluded.keys, updated_at=excluded.updated_at
     `).bind(p.id, p.name, p.builtin ? 1 : 0, p.enabled ? 1 : 0, p.base_url, p.protocol,
-            JSON.stringify(p.headers), JSON.stringify(p.keys), Date.now()).run();
+            JSON.stringify(p.headers), JSON.stringify(p.keys), Math.floor(Date.now() / 1000)).run();
     cache.providers = undefined;                    // 写后清缓存（强一致）
 }
 
@@ -98,6 +99,7 @@ export async function getRoutes(db: D1Database): Promise<Route[]> {
         providers: jget<string[]>(r.providers, []),
         fallback: jget<string[]>(r.fallback, []),
         priority: r.priority, enabled: !!r.enabled, created_at: r.created_at,
+        model_map: jget<Record<string, string>>(r.model_map, {}),
     })) as Route[];
     cache.routes = { data: rows, at: Date.now() };
     return rows;
@@ -105,14 +107,28 @@ export async function getRoutes(db: D1Database): Promise<Route[]> {
 
 export async function saveRoute(db: D1Database, rt: Route): Promise<void> {
     await db.prepare(`
-        INSERT INTO routes(id, name, pattern, providers, fallback, priority, enabled, created_at)
-        VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+        INSERT INTO routes(id, name, pattern, providers, fallback, priority, enabled, model_map, created_at)
+        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
         ON CONFLICT(id) DO UPDATE SET
             name=excluded.name, pattern=excluded.pattern, providers=excluded.providers,
-            fallback=excluded.fallback, priority=excluded.priority, enabled=excluded.enabled
+            fallback=excluded.fallback, priority=excluded.priority, enabled=excluded.enabled,
+            model_map=excluded.model_map
     `).bind(rt.id, rt.name, rt.pattern, JSON.stringify(rt.providers),
-            JSON.stringify(rt.fallback), rt.priority, rt.enabled ? 1 : 0, rt.created_at || Date.now()).run();
+            JSON.stringify(rt.fallback), rt.priority, rt.enabled ? 1 : 0,
+            JSON.stringify(rt.model_map || {}), rt.created_at || Math.floor(Date.now() / 1000)).run();
     cache.routes = undefined;
+}
+
+// 老库兼容：routes 表缺 model_map 列时补列（幂等，重复执行安全）
+export async function ensureRouteModelMap(db: D1Database): Promise<void> {
+    try {
+        const { results } = await db.prepare("PRAGMA table_info(routes)").all() as any;
+        const hasCol = (results || []).some((c: any) => c.name === 'model_map');
+        if (!hasCol) {
+            await db.prepare("ALTER TABLE routes ADD COLUMN model_map TEXT NOT NULL DEFAULT '{}'").run();
+            cache.routes = undefined;
+        }
+    } catch (e) { console.error('[ensureRouteModelMap] failed:', e); }
 }
 
 export async function deleteRoute(db: D1Database, id: string): Promise<void> {
@@ -144,7 +160,7 @@ export async function saveKey(db: D1Database, k: KeyRow): Promise<void> {
             name=excluded.name, provider_id=excluded.provider_id, secret=excluded.secret,
             hint=excluded.hint, masked=excluded.masked, last_used=excluded.last_used
     `).bind(k.id, k.name, k.provider_id, k.secret, k.hint, k.masked,
-            k.created_at || Date.now(), k.last_used).run();
+            k.created_at || Math.floor(Date.now() / 1000), k.last_used).run();
 }
 
 export async function deleteKey(db: D1Database, id: string): Promise<void> {
@@ -153,7 +169,7 @@ export async function deleteKey(db: D1Database, id: string): Promise<void> {
 
 // 记录 Key 最近使用时间（转发成功时调用，best-effort）
 export async function touchKey(db: D1Database, keyId: string): Promise<void> {
-    await db.prepare('UPDATE keys SET last_used = ?1 WHERE id = ?2').bind(Date.now(), keyId).run();
+    await db.prepare('UPDATE keys SET last_used = ?1 WHERE id = ?2').bind(Math.floor(Date.now() / 1000), keyId).run();
 }
 
 // =====================================================================
@@ -272,7 +288,7 @@ export async function recentLogs(db: D1Database, limit = 50): Promise<any[]> {
 // =====================================================================
 // 初始化：首次部署建表 + 写入内置供应商（由 migrate.ts / worker 启动时调用一次）
 // =====================================================================
-export const BUILTIN_PROVIDERS: Omit<Provider, 'keys' | 'created_at' | 'updated_at'>[] = [
+export const BUILTIN_PROVIDERS: Omit<Provider, 'keys' | 'created_at' | 'updated_at' | 'headers'>[] = [
     { id: 'deepseek',  name: 'DeepSeek',       builtin: true, enabled: true, base_url: 'https://api.deepseek.com',   protocol: 'openai' },
     { id: 'qwen',      name: '通义千问',        builtin: true, enabled: true, base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', protocol: 'openai' },
     { id: 'hunyuan',   name: '腾讯混元',        builtin: true, enabled: true, base_url: 'https://api.hunyuan.cloud.tencent.com/v1', protocol: 'openai' },

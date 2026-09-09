@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS routes (
     fallback    TEXT NOT NULL DEFAULT '[]',
     priority    INTEGER NOT NULL DEFAULT 0,
     enabled     INTEGER NOT NULL DEFAULT 1,
+    model_map   TEXT NOT NULL DEFAULT '{}',
     created_at  INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_routes_priority ON routes(priority DESC);
@@ -47,7 +48,7 @@ CREATE TABLE IF NOT EXISTS meta (
     v TEXT NOT NULL DEFAULT '{}'
 );
 INSERT OR IGNORE INTO meta(k, v) VALUES
-    ('version',  '"3.2.0"'),
+    ('version',  '"3.3.0"'),
     ('config',   '{}'),
     ('settings', '{"projectName":"iRouter","baseUrl":"","apiToken":"","tokenMasked":""}'),
     ('stats',    '{"totalRequests":0,"successCount":0,"successRate":0,"avgLatency":0}');

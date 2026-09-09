@@ -1,4 +1,4 @@
--- iRouter v3.2.0 — Cloudflare D1 schema
+-- iRouter v3.3.0 — Cloudflare D1 schema
 -- 部署：wrangler d1 execute irouter --remote --file=./schema.sql
 -- 本地：wrangler d1 execute irouter --local  --file=./schema.sql
 -- 注意：不要在 D1 上执行 PRAGMA journal_mode / foreign_keys ——
@@ -28,9 +28,11 @@ CREATE TABLE IF NOT EXISTS routes (
     fallback    TEXT NOT NULL DEFAULT '[]',  -- 兜底供应商 id 列表
     priority    INTEGER NOT NULL DEFAULT 0,   -- 数值大优先
     enabled     INTEGER NOT NULL DEFAULT 1,
+    model_map   TEXT NOT NULL DEFAULT '{}',  -- 模型名改写 JSON：{ "请求模型名": "上游模型名" }
     created_at  INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_routes_priority ON routes(priority DESC);
+-- 老库兼容：已存在的 routes 表会自动被 CI 的 ensureRouteModelMap 补齐 model_map 列（见 db.ts）
 
 -- 3. API Key（加密存储，只存密文 + 摘要）
 CREATE TABLE IF NOT EXISTS keys (
@@ -51,7 +53,7 @@ CREATE TABLE IF NOT EXISTS meta (
     v TEXT NOT NULL DEFAULT '{}'
 );
 INSERT OR IGNORE INTO meta(k, v) VALUES
-    ('version',  '"3.2.0"'),
+    ('version',  '"3.3.0"'),
     ('config',   '{}'),
     ('settings', '{"projectName":"iRouter","baseUrl":"","apiToken":"","tokenMasked":""}'),
     ('stats',    '{"totalRequests":0,"successCount":0,"successRate":0,"avgLatency":0}');

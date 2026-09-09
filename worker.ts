@@ -1,4 +1,4 @@
-// worker.ts — iRouter v3.2.0 (Cloudflare Workers + D1)
+// worker.ts — iRouter v3.3.0 (Cloudflare Workers + D1)
 // 相比 v3.0 (KV 版) 的变化：存储层从 Deno KV / Workers KV 全部迁移到 D1 (db.ts)
 // Hono 路由定义、API 路径、前端 dashboard.html 完全不变（路由层/前端零改动）
 
@@ -6,6 +6,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import * as db from './db';
+import type { D1Database, ExecutionContext } from '@cloudflare/workers-types';
 
 // ---------- 类型 ----------
 interface Env {
@@ -26,15 +27,40 @@ function maskToken(t: string): string {
     return t.slice(0, 4) + '****' + t.slice(-4);
 }
 
-// 管理员鉴权（Cookie session + HMAC-SHA256 签名）
+// 管理员鉴权（Cookie session + HMAC-SHA256 签名 + 24h 有效期）
+// 会话密钥优先用 env.SESSION_SECRET；未配置时回退到 bootstrap 写入 meta 的 session_secret
+async function getSessionSecret(env: Env): Promise<string> {
+    if (env.SESSION_SECRET) return env.SESSION_SECRET;
+    try {
+        const s = await db.metaGet<string>(env.DB, 'session_secret', '');
+        return s || '';
+    } catch { return ''; }
+}
+
+// 凭据来源探测：环境变量优先，其次 meta（bootstrap 写入）。返回不抛错。
+async function bootstrapMeta(env: Env): Promise<{ pass: string; secret: string }> {
+    let pass = env.DEFAULT_ADMIN_PASS || '';
+    let secret = env.SESSION_SECRET || '';
+    try {
+        if (!pass) pass = await db.metaGet<string>(env.DB, 'admin_pass_hash', '');
+        if (!secret) secret = await db.metaGet<string>(env.DB, 'session_secret', '');
+    } catch { /* meta 表缺失时按未配置处理 */ }
+    return { pass, secret };
+}
 async function isAdmin(req: Request, env: Env): Promise<boolean> {
     const cookie = req.headers.get('cookie') || '';
     const m = cookie.match(/irouter_sid=([^;]+)/);
     if (!m) return false;
     try {
-        const [user, sig] = atob(m[1]).split(':');
-        const expected = await hmacSha256(env.SESSION_SECRET, 'admin');
-        return user === 'admin' && sig === expected;
+        // 新格式：admin:ts:sig；旧格式（无 ts）直接失效需重新登录
+        const parts = atob(m[1]).split(':');
+        if (parts.length !== 3 || parts[0] !== 'admin') return false;
+        const ts = Number(parts[1]);
+        if (!ts || Date.now() - ts > 24 * 3600 * 1000) return false;   // 服务端 24h 过期
+        const secret = await getSessionSecret(env);
+        if (!secret) return false;
+        const expected = await hmacSha256(secret, 'admin:' + ts);
+        return parts[2] === expected;
     } catch { return false; }
 }
 
@@ -55,6 +81,53 @@ function timingSafeEqual(a: string, b: string): boolean {
     return diff === 0;
 }
 
+// =====================================================================
+// /v1/models 模型目录：内置供应商 → 常见模型名（静态，开箱即用）
+// 自定义供应商走 runtime 探测（probeProviderModels，60s 缓存）
+// =====================================================================
+const MODEL_CATALOG: Record<string, string[]> = {
+    deepseek: ['deepseek-chat', 'deepseek-reasoner'],
+    qwen: ['qwen-plus', 'qwen-max', 'qwen-turbo', 'qwen-long', 'qwen2.5-72b-instruct'],
+    hunyuan: ['hunyuan-turbo', 'hunyuan-standard', 'hunyuan-pro'],
+    doubao: ['doubao-pro-32k', 'doubao-lite-32k', 'doubao-seed-1-6-250615'],
+    kimi: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k', 'kimi-k2-0711-preview'],
+    glm: ['glm-4-plus', 'glm-4-air', 'glm-4-flash', 'glm-4v-plus'],
+    siliconflow: ['deepseek-ai/DeepSeek-V3', 'deepseek-ai/DeepSeek-R1', 'Qwen/Qwen2.5-72B-Instruct'],
+    groq: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'],
+    together: ['meta-llama/Llama-3.3-70B-Instruct-Turbo', 'deepseek-ai/DeepSeek-V3'],
+    openrouter: ['openai/gpt-4o', 'anthropic/claude-3.5-sonnet', 'deepseek/deepseek-chat'],
+    fireworks: ['accounts/fireworks/models/llama-v3p1-70b-instruct', 'accounts/fireworks/models/deepseek-v3'],
+    novita: ['meta-llama/llama-3.1-8b-instruct', 'deepseek/deepseek-chat'],
+    ppio: ['gpt-4o', 'deepseek-chat', 'glm-4-plus'],
+    mistral: ['mistral-large-latest', 'mistral-small-latest', 'open-mistral-nemo'],
+    cohere: ['command-r-plus', 'command-r-plus-08-2024'],
+    openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'o3-mini'],
+};
+
+// 自定义供应商 /models 探测缓存（60s）
+const modelProbeCache: { data: Record<string, string[]>; at: number } = { data: {}, at: 0 };
+async function probeProviderModels(env: Env, p: db.Provider, force = false): Promise<string[]> {
+    // 静态目录命中时永不探测
+    if (!force && MODEL_CATALOG[p.id]?.length) return [];
+    if (!force && Date.now() - modelProbeCache.at < 60_000) return modelProbeCache.data[p.id] || [];
+    try {
+        const keys = await db.getKeys(env.DB, p.id);
+        for (const k of keys) {
+            let apiKey: string;
+            try { apiKey = await decrypt(k.secret, env.ENCRYPT_KEY); } catch { continue; }
+            const url = p.base_url + (p.base_url.endsWith('/') ? '' : '/') + 'models';
+            const res = await fetch(url, { headers: { authorization: 'Bearer ' + apiKey, ...p.headers } });
+            if (!res.ok) continue;
+            const j = await res.json().catch(() => null) as any;
+            const list = (j?.data || []).map((m: any) => String(m.id)).filter(Boolean).slice(0, 50);
+            modelProbeCache.data[p.id] = list;
+            modelProbeCache.at = Date.now();
+            return list;
+        }
+    } catch (e) { /* best-effort */ }
+    return [];
+}
+
 // 路由 pattern → 正则：* 转 .*，其余正则元字符全部转义（防误匹配/非法正则 500）
 function patternToRegex(pattern: string): RegExp | null {
     try {
@@ -73,18 +146,23 @@ const loginFailures = new Map<string, { count: number; at: number }>();
 const LOGIN_LIMIT = { max: 5, windowMs: 60_000 };
 
 // settings 短缓存（60s）：代理鉴权需要读取 settings.apiToken，避免每次请求都查 D1
+// 首次部署表未创建时容错返回默认值（bootstrap 初始化可先于建表可用）
 const settingsCache: { data: db.Settings | null; at: number } = { data: null, at: 0 };
 async function getSettingsCached(env: Env): Promise<db.Settings> {
     if (settingsCache.data && Date.now() - settingsCache.at < 60_000) return settingsCache.data;
-    const s = await db.getSettings(env.DB);
-    settingsCache.data = s;
-    settingsCache.at = Date.now();
-    return s;
+    try {
+        const s = await db.getSettings(env.DB);
+        settingsCache.data = s;
+        settingsCache.at = Date.now();
+        return s;
+    } catch {
+        return { projectName: 'iRouter', baseUrl: '', apiToken: '', tokenMasked: '' };
+    }
 }
 
-// 错误响应
-function err(status: number, msg: string) {
-    return new Response(JSON.stringify({ error: msg }), {
+// 错误响应（OpenAI 兼容结构：{ error: { message, type, code } }）
+function err(status: number, msg: string, type = 'invalid_request_error') {
+    return new Response(JSON.stringify({ error: { message: msg, type, code: status } }), {
         status, headers: { 'content-type': 'application/json' },
     });
 }
@@ -96,32 +174,56 @@ export default {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
         const app = new Hono<{ Bindings: Env }>();
 
-        app.use('*', cors({ origin: '*', credentials: false }));
+        // CORS 仅对 /v1/* 开放（管理后台/健康检查均为同源浏览器访问，无需跨域）
+        app.use('/v1/*', cors({ origin: '*', credentials: false }));
         app.use('*', logger());
 
-        // ---------- 首次启动：迁移内置供应商（整个 isolate 只执行一次，幂等）----------
+        // ---------- 首次启动：迁移内置供应商 + 老库补列（整个 isolate 只执行一次，幂等）----------
         if (!builtinsInit) {
-            builtinsInit = db.migrateBuiltins(env.DB).catch((e) => console.error('migrateBuiltins failed:', e));
+            builtinsInit = (async () => {
+                await db.migrateBuiltins(env.DB);
+                await db.ensureRouteModelMap(env.DB);   // 老库（含线上已部署库）自动补 model_map 列，幂等
+            })().catch((e) => console.error('init migrations failed:', e));
         }
         ctx.waitUntil(builtinsInit);
 
         // ---------- 健康检查 ----------
-        app.get('/health', (c) => c.json({ ok: true, version: '3.2.0', storage: 'd1' }));
+        app.get('/health', (c) => c.json({ ok: true, version: '3.3.0', storage: 'd1' }));
 
         // =================================================================
         // 代理转发（流式透传，CPU < 5ms，不 buffer 完整响应）
         // =================================================================
-        app.post('/v1/chat/completions', async (c) => {
+        // 鉴权：PROXY_KEY 优先；未配置时回退后台「调用信息」Token；两者都无则拒绝（绝不无鉴权放行）
+        const gwToken = env.PROXY_KEY || (await getSettingsCached(env)).apiToken;
+        app.use('/v1/*', async (c, next) => {
+            if (!gwToken) return err(500, '网关 Token 未配置：请设置 PROXY_KEY 环境变量，或在管理后台「调用信息」中设置 Token', 'gateway_not_configured');
             const auth = c.req.header('authorization') || '';
             const token = auth.replace(/^Bearer\s+/i, '');
-            // 鉴权键：环境变量 PROXY_KEY 优先；未配置时回退到后台「调用信息」里设置的 Token；
-            // 两者都未配置则拒绝服务（绝不无鉴权放行）
-            const expectedKey = env.PROXY_KEY || (await getSettingsCached(env)).apiToken;
-            if (!expectedKey) return err(500, '网关 Token 未配置：请设置 PROXY_KEY 环境变量，或在管理后台「调用信息」中设置 Token');
-            if (!token || token !== expectedKey) return err(401, 'Unauthorized');
+            if (!token || token !== gwToken) return err(401, 'Unauthorized', 'authentication_error');
+            await next();
+        });
 
+        // GET /v1/models — OpenAI 兼容模型清单（agent/SDK 接入前会先拉取此端点）
+        app.get('/v1/models', async (c) => {
+            const providers = await db.getProviders(env.DB);
+            const data: { id: string; object: string; owned_by: string }[] = [];
+            for (const p of providers) {
+                if (!p.enabled) continue;
+                const builtin = MODEL_CATALOG[p.id];
+                if (builtin && builtin.length) {
+                    for (const mid of builtin) data.push({ id: mid, object: 'model', owned_by: p.id });
+                    continue;
+                }
+                // 自定义供应商：best-effort 探测其 /models（60s 缓存），失败静默跳过
+                const probe = await probeProviderModels(env, p);
+                if (probe && probe.length) for (const mid of probe) data.push({ id: mid, object: 'model', owned_by: p.id });
+            }
+            return c.json({ object: 'list', data });
+        });
+
+        app.post('/v1/chat/completions', async (c) => {
             const body = await c.req.json().catch(() => null);
-            if (!body || !body.model) return err(400, 'model required');
+            if (!body || !body.model) return err(400, 'model required', 'invalid_request_error');
 
             const start = Date.now();
             // 路由匹配：找命中的供应商（pattern 支持 * 通配，其余字符按字面匹配）
@@ -135,29 +237,41 @@ export default {
                 })
                 .sort((a, b) => b.priority - a.priority || b.created_at - a.created_at)[0];
 
+            // 无匹配路由 → 明确 404（不再静默轮询全部启用的供应商）
+            if (!matched) {
+                db.logRing.push({ model, provider: 'none', ok: false, latency_ms: Date.now() - start, status: 404 });
+                db.logRing.flush(env.DB);
+                return err(404, `未配置模型「${model}」的转发路由：请先到管理后台「路由规则」添加匹配规则（如 pattern=* 的默认路由）`, 'model_not_found');
+            }
+
             const providers = await db.getProviders(env.DB);
-            const tryList = matched
-                ? [...matched.providers, ...matched.fallback]
-                : providers.filter(p => p.enabled).map(p => p.id);
+            // 展开候选：严格按用户配置顺序 [providers..., fallback...]，同供应商多个 key 依次轮换
+            const tryQueue: { p: db.Provider; k: db.KeyRow }[] = [];
+            for (const pid of [...matched.providers, ...matched.fallback]) {
+                const p = providers.find(x => x.id === pid);
+                if (!p || p.protocol !== 'openai') continue;   // 非 openai 协议暂不支持，跳过
+                const keys = await db.getKeys(env.DB, p.id);
+                for (const k of keys) tryQueue.push({ p, k });
+            }
+
+            if (tryQueue.length === 0) {
+                db.logRing.push({ model, provider: 'none', ok: false, latency_ms: Date.now() - start, status: 502 });
+                db.logRing.flush(env.DB);
+                return err(502, `路由「${matched.name || matched.id}」下没有可用的 openai 协议供应商或 Key，请先配置供应商 Key`, 'provider_unavailable');
+            }
+
+            // 模型名改写：路由 model_map 里命中则替换上游 model（agent 请求名 → 供应商实际模型名）
+            const upstreamModel = (matched.model_map || {})[model] || model;
+            const upstreamBody = upstreamModel === model ? body : { ...body, model: upstreamModel };
 
             let lastErr: any = null;
-            for (const pid of tryList) {
-                const p = providers.find(x => x.id === pid);
-                if (!p) continue;
-                if (p.protocol !== 'openai') {
-                    lastErr = new Error(`供应商 ${p.id} 的协议 ${p.protocol} 暂未实现（当前仅支持 openai），已跳过`);
-                    continue;
-                }
-                const keys = await db.getKeys(env.DB, p.id);
-                if (keys.length === 0) continue;
-                const key = keys[Math.floor(Math.random() * keys.length)];
-
-                // 解密 secret（AES-GCM）；解密失败给出明确错误并尝试下一个供应商
+            for (const { p, k } of tryQueue) {
+                // 解密 secret（AES-GCM）；解密失败给出明确错误并尝试下一个 Key/供应商
                 let apiKey: string;
                 try {
-                    apiKey = await decrypt(key.secret, env.ENCRYPT_KEY);
+                    apiKey = await decrypt(k.secret, env.ENCRYPT_KEY);
                 } catch (e) {
-                    lastErr = new Error(`key ${key.id} 解密失败（请确认 ENCRYPT_KEY 与保存该 Key 时一致）`);
+                    lastErr = new Error(`key ${k.id} 解密失败（请确认 ENCRYPT_KEY 与保存该 Key 时一致）`);
                     continue;
                 }
 
@@ -166,36 +280,41 @@ export default {
                     const upstreamReq = new Request(upstream, {
                         method: 'POST',
                         headers: { 'content-type': 'application/json', 'authorization': 'Bearer ' + apiKey, ...p.headers },
-                        body: JSON.stringify(body),
+                        body: JSON.stringify(upstreamBody),
                         // CF 特有：带 body 的 fetch 必须 duplex: 'half'，否则抛异常
                         duplex: 'half' as any,
                     });
                     const res = await fetch(upstreamReq);
+                    const latency = Date.now() - start;
+
+                    // 上游 4xx/5xx：读取错误文本记录后继续兜底（不把失败直接透传给 agent）
+                    if (!res.ok) {
+                        const errText = await res.text().catch(() => '');
+                        lastErr = new Error(`[${p.id}] HTTP ${res.status} ${errText.slice(0, 300) || res.statusText}`);
+                        db.logRing.push({ model, provider: p.id, ok: false, latency_ms: latency, status: res.status });
+                        db.logRing.flush(env.DB);
+                        continue;
+                    }
+
+                    ctx.waitUntil(db.touchKey(env.DB, k.id));
+                    db.logRing.push({ model, provider: p.id, ok: true, latency_ms: latency, status: res.status });
+                    db.logRing.flush(env.DB);
 
                     // 流式：直接透传 ReadableStream，零 buffer
                     if (body.stream && res.body) {
-                        const latency = Date.now() - start;
-                        ctx.waitUntil(db.touchKey(env.DB, key.id));
-                        db.logRing.push({ model, provider: p.id, ok: res.ok, latency_ms: latency, status: res.status });
-                        db.logRing.flush(env.DB);     // best-effort 落盘
                         return new Response(res.body, { status: res.status, headers: res.headers });
                     }
-
                     const text = await res.text();
-                    const latency = Date.now() - start;
-                    ctx.waitUntil(db.touchKey(env.DB, key.id));
-                    db.logRing.push({ model, provider: p.id, ok: res.ok, latency_ms: latency, status: res.status });
-                    db.logRing.flush(env.DB);
                     return new Response(text, { status: res.status, headers: res.headers });
                 } catch (e) {
                     lastErr = e;
-                    continue;            // 尝试下一个供应商（兜底）
+                    continue;            // 尝试下一个 Key / 供应商（兜底）
                 }
             }
 
             db.logRing.push({ model, provider: 'none', ok: false, latency_ms: Date.now() - start, status: 502 });
             db.logRing.flush(env.DB);
-            return err(502, 'All providers failed: ' + (lastErr?.message || 'no available provider'));
+            return err(502, `所有供应商均失败：${lastErr?.message || '无可用供应商'}`, 'upstream_error');
         });
 
         // =================================================================
@@ -203,11 +322,31 @@ export default {
         // =================================================================
 
         // =================================================================
-        // API：认证
+        // API：认证（支持两种凭据来源：环境变量优先，其次 bootstrap 写入的 meta）
         // =================================================================
+        app.get('/admin/api/bootstrap', async (c) => {
+            const { pass, secret } = await bootstrapMeta(env);
+            return c.json({ required: !pass || !secret });
+        });
+        app.post('/admin/api/bootstrap', async (c) => {
+            const { password = '', session_secret = '' } = await c.req.json().catch(() => ({})) as any;
+            if (String(password).length < 6) return err(400, '管理员密码至少 6 位');
+            if (String(session_secret).length < 12) return err(400, '会话密钥至少 12 位随机串');
+            const cur = await bootstrapMeta(env);
+            if (cur.pass || cur.secret) return err(409, '已初始化过，如需重置请先删除 meta 中 admin_pass_hash/session_secret');
+            // 存 HMAC(password, session_secret)，即使库被读到也无法直接还原密码
+            const hash = await hmacSha256(String(session_secret), String(password));
+            await db.metaSet(env.DB, 'admin_pass_hash', hash);
+            await db.metaSet(env.DB, 'session_secret', String(session_secret));
+            return c.json({ ok: true });
+        });
         app.post('/admin/api/login', async (c) => {
-            if (!env.DEFAULT_ADMIN_PASS) {
-                return err(500, '未配置 DEFAULT_ADMIN_PASS：请先在 Cloudflare 控制台 → Settings → Variables 中设置后台密码');
+            const { pass, secret } = await bootstrapMeta(env);
+            if (!pass) {
+                return err(500, '未配置管理员密码：请设置 DEFAULT_ADMIN_PASS 环境变量，或先用下方「快速初始化」完成首次配置');
+            }
+            if (!secret) {
+                return err(500, '未配置会话密钥：请设置 SESSION_SECRET 环境变量，或先用下方「快速初始化」完成首次配置');
             }
             // 登录失败限速（软限制）
             const ip = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || 'unknown';
@@ -217,18 +356,21 @@ export default {
                 return err(429, '尝试次数过多，请 1 分钟后再试');
             }
             const { password } = await c.req.json().catch(() => ({ password: '' }));
-            if (typeof password !== 'string' || !timingSafeEqual(password, env.DEFAULT_ADMIN_PASS)) {
+            let ok = false;
+            if (env.DEFAULT_ADMIN_PASS) {
+                ok = typeof password === 'string' && timingSafeEqual(password, env.DEFAULT_ADMIN_PASS);
+            } else {
+                ok = typeof password === 'string' && timingSafeEqual(await hmacSha256(secret, password), pass);
+            }
+            if (!ok) {
                 const f = loginFailures.get(ip);
                 if (!f || now - f.at >= LOGIN_LIMIT.windowMs) loginFailures.set(ip, { count: 1, at: now });
                 else f.count++;
                 return err(401, '密码错误');
             }
             loginFailures.delete(ip);
-            if (!env.SESSION_SECRET) {
-                return err(500, '未配置 SESSION_SECRET：请先在 Cloudflare 控制台 → Settings → Variables 中设置会话密钥（任意长随机串），否则无法登录');
-            }
-            const sig = await hmacSha256(env.SESSION_SECRET, 'admin');
-            const sid = btoa('admin:' + sig);
+            const sig = await hmacSha256(secret, 'admin:' + now);
+            const sid = btoa('admin:' + now + ':' + sig);
             return new Response(JSON.stringify({ ok: true }), {
                 status: 200,
                 headers: {
@@ -248,7 +390,7 @@ export default {
                 db.getRoutes(env.DB),
                 db.getKeys(env.DB),
                 db.getStats(env.DB),
-                db.recentLogs(env.DB, 10),
+                db.recentLogs(env.DB, 200),
                 db.getSettings(env.DB),
             ]);
 
@@ -277,7 +419,7 @@ export default {
             });
 
             return c.json({
-                version: '3.2.0',
+                version: '3.3.0',
                 generatedAt: Date.now(),
                 storage: { mode: 'd1', writable: true, warning: null },
                 counts: { providers: providers.length, routes: routes.length, keys: keys.length },
@@ -348,8 +490,8 @@ export default {
                 protocol: body.protocol || 'openai',
                 headers: body.headers || {},
                 keys: body.keys || [],
-                created_at: Date.now(),
-                updated_at: Date.now(),
+                created_at: Math.floor(Date.now() / 1000),
+                updated_at: Math.floor(Date.now() / 1000),
             };
             await db.saveProvider(env.DB, p);
             return c.json({ ok: true, id: p.id }, 201);
@@ -367,7 +509,7 @@ export default {
                 base_url: body.base_url ?? cur.base_url,
                 protocol: body.protocol ?? cur.protocol,
                 headers: body.headers ?? cur.headers,
-                updated_at: Date.now(),
+                updated_at: Math.floor(Date.now() / 1000),
             };
             await db.saveProvider(env.DB, next);
             return c.json({ ok: true });
@@ -376,6 +518,37 @@ export default {
             if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
             await db.deleteProvider(env.DB, c.req.param('id'));
             return c.json({ ok: true });
+        });
+        // 供应商测试连接：实际用第一个 Key 请求上游 /models，给出可读结论（不写日志、不 touch key）
+        app.post('/admin/api/providers/:id/test', async (c) => {
+            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
+            const id = c.req.param('id');
+            const p = await db.getProvider(env.DB, id);
+            if (!p) return err(404, '供应商不存在');
+            const keys = await db.getKeys(env.DB, id);
+            if (keys.length === 0) return c.json({ ok: false, message: '该供应商还没有 Key，请先添加 Key 再测试' });
+            let apiKey: string;
+            try {
+                apiKey = await decrypt(keys[0].secret, env.ENCRYPT_KEY);
+            } catch {
+                return c.json({ ok: false, message: 'Key 解密失败：可能与保存时的 ENCRYPT_KEY 不一致，请重新保存 Key' });
+            }
+            const base = p.base_url.replace(/\/+$/, '');
+            const url = base + (base.endsWith('/v1') || base.endsWith('/api') ? '' : '/v1') + '/models';
+            const sentAt = Date.now();
+            try {
+                const res = await fetch(url, { headers: { authorization: 'Bearer ' + apiKey, ...p.headers } });
+                const ms = Date.now() - sentAt;
+                if (!res.ok) {
+                    const text = (await res.text().catch(() => '')).slice(0, 200);
+                    return c.json({ ok: false, message: `HTTP ${res.status}${text ? '：' + text : ''}（${ms}ms）` });
+                }
+                const j = await res.json().catch(() => null) as any;
+                const n = Array.isArray(j?.data) ? j.data.length : 0;
+                return c.json({ ok: true, message: `连接成功（${ms}ms），返回 ${n} 个可用模型` });
+            } catch (e) {
+                return c.json({ ok: false, message: `请求失败：${(e as Error).message}` });
+            }
         });
 
         // =================================================================
@@ -396,7 +569,8 @@ export default {
                 fallback: body.fallback || [],
                 priority: body.priority || 0,
                 enabled: body.enabled !== false,
-                created_at: Date.now(),
+                model_map: body.model_map && typeof body.model_map === 'object' ? body.model_map : {},
+                created_at: Math.floor(Date.now() / 1000),
             };
             await db.saveRoute(env.DB, rt);
             return c.json({ ok: true, id: rt.id }, 201);
@@ -416,6 +590,7 @@ export default {
                 fallback: body.fallback ?? cur.fallback,
                 priority: body.priority ?? cur.priority,
                 enabled: body.enabled ?? cur.enabled,
+                model_map: body.model_map && typeof body.model_map === 'object' ? body.model_map : cur.model_map,
             };
             await db.saveRoute(env.DB, next);
             return c.json({ ok: true });
@@ -449,7 +624,7 @@ export default {
                 secret: encrypted,
                 hint: String(body.secret).slice(-4),
                 masked: '****' + String(body.secret).slice(-4),
-                created_at: Date.now(),
+                created_at: Math.floor(Date.now() / 1000),
                 last_used: 0,
             };
             await db.saveKey(env.DB, k);
@@ -666,7 +841,7 @@ const ADMIN_HTML = `<!DOCTYPE html>
 </div>
 <div class="layout">
   <aside class="sidebar">
-    <div class="brand"><div class="brand-text"><h1>iRouter<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button></h1><small>智能路由网关 v3.2.0</small></div></div>
+    <div class="brand"><div class="brand-text"><h1>iRouter<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button></h1><small>智能路由网关 v3.3.0</small></div></div>
     <nav class="nav">
       <a href="#dashboard" class="active" data-view="dashboard">🏠 首页</a>
       <a href="#providers" data-view="providers">⚙️ 供应商</a>
@@ -728,7 +903,13 @@ window.api = function(method, path, body){
     body:b?JSON.stringify(b):undefined,
     credentials:'include'
   }).then(function(r){
-    if(!r.ok) return r.json().then(function(e){ throw e; });
+    if(!r.ok) return r.json().then(function(e){
+      // 错误归一化为字符串：兼容 {error:{message}} / {error:'msg'} / {message} / 裸文本
+      var msg = (e&&e.error&&typeof e.error==='object'&&e.error.message)?e.error.message
+              : (e&&typeof e.error==='string')?e.error
+              : (e&&e.message)||(typeof e==='string'?e:'请求失败');
+      throw msg;
+    });
     return r.json();
   });
 };
@@ -758,6 +939,7 @@ function render(){
 // ---- 首页 Dashboard ----
 function render_dashboard(main){
   main.innerHTML = '<div class="topbar"><h2>🏠 管理首页</h2><button class="btn" onclick="fetchDashboard()">🔄 刷新</button></div>'
+    + '<div class="panel" id="setup-hint" style="display:none;border-left:4px solid var(--acc)"></div>'
     + '<div class="cards" id="cards"></div>'
     + '<div class="grid2">'
     +   '<div class="panel"><h3>📊 模型调用排行</h3><div id="ranking"></div></div>'
@@ -772,12 +954,28 @@ function fetchDashboard(){
   api('GET','/admin/api/dashboard').then(function(d){
     var data = d.data || d;   // 兼容 {ok,data} 与裸对象两种返回
     state.settings = data.settings;
+    render_setup_hint(data);
     render_cards(data);
     render_ranking(data.modelRanking||[]);
     render_health(data.providerHealth||[]);
     render_recent(data.recent||[]);
     if(!localStorage.getItem('irouter_guide_dismissed')) render_guide_mini();
   }).catch(function(e){ toast('加载失败：'+(e&&e.error||e)); });
+}
+
+// 首次引导：缺 Key / 缺路由 / 未启用供应商时给出下一步操作提示
+function render_setup_hint(data){
+  var el = document.getElementById('setup-hint');
+  if(!el) return;
+  var counts = data.counts||{}, providers = data.providers||[];
+  var tips = [];
+  if(!(counts.keys||0)) tips.push('① 前往【API Keys】添加至少一个供应商的真实 Key（AES-GCM 加密存储）');
+  else if(!(counts.routes||0)) tips.push('① 前往【路由规则】添加一条规则（如 pattern=<code>*</code> + 命中供应商），未匹配模型将返回明确 404');
+  if(!providers.some(function(p){return p.enabled;})) tips.push('② 在【供应商】页启用至少一家供应商（点击状态徽章可切换）');
+  if(!(counts.keys||0)&&!(counts.routes||0)) tips.push('② 再到【路由规则】建默认路由，即可用 <code>/v1</code> 直接发起调用');
+  if(!tips.length){ el.style.display='none'; return; }
+  el.style.display='';
+  el.innerHTML = '<b>🚀 快速开始（'+(counts.keys||0)+' 个 Key / '+(counts.routes||0)+' 条路由 / '+providers.filter(function(p){return p.enabled;}).length+' 个启用供应商）</b><div style="margin-top:8px;font-size:13px;color:var(--muted)">'+tips.join('<br>')+'</div>';
 }
 
 function render_cards(data){
@@ -848,7 +1046,7 @@ function render_conn(s){
            + '  -H "Content-Type: application/json" \\\\\\n'
            + '  -d \\'{ "model": "gpt-4o-mini", "messages": [{"role":"user","content":"hello"}] }\\'';
   document.getElementById('conn').innerHTML = ''
-    + row_html('🏷️ 项目名', esc(s.projectName||'iRouter')+' <span class="badge ok">v3.2.0 · D1</span>')
+    + row_html('🏷️ 项目名', esc(s.projectName||'iRouter')+' <span class="badge ok">v3.3.0 · D1</span>')
     + row_html('🌐 网关 Base URL', '<code id="conn-url">'+esc(baseUrl)+'</code> <span class="copy" onclick="copyText(\\'conn-url\\')">📋 复制</span>')
     + row_html('🔑 调用 Token', '<code id="conn-token">'+esc(token)+'</code> <span class="copy" onclick="copyText(\\'conn-token\\')">📋 复制</span>')
     + '<div style="margin-top:14px"><label style="font-size:12px;color:var(--muted)">📦 快速调用示例（curl）</label><pre id="conn-curl">'+esc(curl)+'</pre><span class="copy" onclick="copyText(\\'conn-curl\\')">📋 复制</span></div>';
@@ -892,10 +1090,18 @@ function render_prov_table(){
     return '<tr><td>'+esc(p.name)+'</td><td><code>'+esc(p.id)+'</code></td><td><code>'+esc(p.base_url)+'</code></td><td>'+esc(p.protocol)+'</td>'
       + '<td><span class="badge '+(p.builtin?'info':'plain')+'">'+(p.builtin?'内置':'自定义')+'</span></td>'
       + '<td><span class="badge '+(p.enabled?'ok':'err')+'" style="cursor:pointer" onclick="toggleProvider(\\''+esc(p.id)+'\\')" title="点击切换状态">'+(p.enabled?'启用':'停用')+'</span></td>'
-      + '<td><button class="btn ghost" onclick="editProvider(\\''+esc(p.id)+'\\')">编辑</button> '
+      + '<td><button class="btn ghost" onclick="testProvider(\\''+esc(p.id)+'\\')">测试</button> '
+      + '<button class="btn ghost" onclick="editProvider(\\''+esc(p.id)+'\\')">编辑</button> '
       + (p.builtin?'':'<button class="btn danger" onclick="deleteProvider(\\''+esc(p.id)+'\\')">删除</button>')+'</td></tr>';
   }).join('')||'<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px">暂无供应商</td></tr>';
 }
+window.testProvider=function(id){
+  api('POST','/admin/api/providers/'+id+'/test').then(function(r){
+    toast((r.ok?'✅ ':'❌ ')+r.message);
+  }).catch(function(e){
+    toast('❌ '+(e&&e.error||e));
+  });
+};
 window.openProvider=function(){setModal('<h3>添加供应商</h3>'
   +'<div class="form-row"><div style="flex:1"><label>名称</label><input id="m-name"></div><div style="flex:1"><label>标识（唯一 ID）</label><input id="m-id" placeholder="my-provider"></div></div>'
   +'<div class="form-row"><div style="flex:1"><label>Base URL</label><input id="m-url" placeholder="https://api.example.com/v1"></div><div style="flex:1"><label>协议</label><select id="m-proto"><option value="openai">openai</option><option value="anthropic">anthropic</option><option value="gemini">gemini</option><option value="custom">custom</option></select></div></div>'
@@ -912,32 +1118,38 @@ window.toggleProvider=function(id){var p=state.providers.find(function(x){return
 // ---- 路由规则 ----
 function render_routes(main){
   main.innerHTML='<div class="topbar"><h2>🔀 路由规则</h2><button class="btn" onclick="openRoute()">＋ 添加规则</button></div>'
-    + '<div class="panel"><div class="table-scroll"><table><thead><tr><th>名称</th><th>匹配模式</th><th>命中供应商</th><th>兜底</th><th>优先级</th><th>操作</th></tr></thead><tbody id="rt-tbody"></tbody></table></div></div>';
+    + '<div class="panel"><div class="table-scroll"><table><thead><tr><th>名称</th><th>匹配模式</th><th>命中供应商</th><th>兜底</th><th>优先级</th><th>模型映射</th><th>操作</th></tr></thead><tbody id="rt-tbody"></tbody></table></div></div>';
   api('GET','/admin/api/routes').then(function(d){state.routes=d.data||d;render_route_table();}).catch(function(e){toast(e&&e.error||e);});
 }
 function render_route_table(){
   var tb=document.getElementById('rt-tbody');
   tb.innerHTML=state.routes.map(function(r){
+    var mm=modelMapToText(r.model_map);
     return '<tr><td>'+esc(r.name||'(未命名)')+'</td><td><code>'+esc(r.pattern)+'</code></td>'
       +'<td>'+(r.providers||[]).map(esc).join(' → ')+'</td>'
       +'<td>'+((r.fallback||[]).map(esc).join(' → ')||'<span style="color:var(--muted)">-</span>')+'</td>'
       +'<td>'+(r.priority||0)+'</td>'
+      +'<td style="font-size:12px;color:var(--muted)">'+(mm?esc(mm):'-')+'</td>'
       +'<td><button class="btn ghost" onclick="editRoute(\\''+esc(r.id)+'\\')">编辑</button> <button class="btn danger" onclick="deleteRoute(\\''+esc(r.id)+'\\')">删除</button></td></tr>';
   }).join('');
 }
 window.openRoute=function(){setModal('<h3>添加路由规则</h3>'
   +'<div class="form-row"><div style="flex:1"><label>名称</label><input id="r-name"></div><div style="flex:1"><label>匹配模式（支持 * 通配，如 gpt-*）</label><input id="r-pattern" value="*"></div></div>'
   +'<div class="form-row"><div style="flex:1"><label>命中供应商 ID（逗号分隔，有序）</label><input id="r-prov" placeholder="openai,anthropic"></div><div style="flex:1"><label>兜底供应商 ID</label><input id="r-fb" placeholder="openrouter"></div></div>'
-  +'<div class="form-row"><div style="flex:1"><label>优先级（大者优先）</label><input id="r-pri" type="number" value="0"></div></div>'
+  +'<div class="form-row"><div style="flex:1"><label>优先级（大者优先）</label><input id="r-pri" type="number" value="0"></div><div style="flex:1"><label>模型映射（可选：agent模型=上游模型，逗号分隔）</label><input id="r-map" placeholder="gpt-4o=deepseek-chat, claude-3.5-sonnet=hunyuan-turbo"></div></div>'
+  +'<p style="font-size:11px;color:var(--muted);margin-top:4px">模型映射让 agent 用 A 的模型名调用 B 的模型：请求模型名命中映射时，转发前改写为上游模型名；留空=原样透传。</p>'
   +'<button class="btn" onclick="submitRoute()">保存</button>');};
-window.submitRoute=function(){api('POST','/admin/api/routes',{name:document.getElementById('r-name').value,pattern:document.getElementById('r-pattern').value,providers:document.getElementById('r-prov').value.split(',').map(function(s){return s.trim();}).filter(Boolean),fallback:document.getElementById('r-fb').value.split(',').map(function(s){return s.trim();}).filter(Boolean),priority:parseInt(document.getElementById('r-pri').value)||0}).then(function(){closeModal();render_routes(document.getElementById('view'));toast('✅ 已添加');});};
+window.submitRoute=function(){api('POST','/admin/api/routes',{name:document.getElementById('r-name').value,pattern:document.getElementById('r-pattern').value,providers:document.getElementById('r-prov').value.split(',').map(function(s){return s.trim();}).filter(Boolean),fallback:document.getElementById('r-fb').value.split(',').map(function(s){return s.trim();}).filter(Boolean),priority:parseInt(document.getElementById('r-pri').value)||0,model_map:parseModelMap(document.getElementById('r-map').value)}).then(function(){closeModal();render_routes(document.getElementById('view'));toast('✅ 已添加');});};
 window.editRoute=function(id){var r=state.routes.find(function(x){return x.id===id;});if(!r)return;setModal('<h3>编辑路由规则</h3>'
   +'<div class="form-row"><div style="flex:1"><label>名称</label><input id="r-name" value="'+esc(r.name||'')+'"></div><div style="flex:1"><label>匹配模式</label><input id="r-pattern" value="'+esc(r.pattern)+'"></div></div>'
   +'<div class="form-row"><div style="flex:1"><label>命中供应商</label><input id="r-prov" value="'+esc((r.providers||[]).join(','))+'"></div><div style="flex:1"><label>兜底</label><input id="r-fb" value="'+esc((r.fallback||[]).join(','))+'"></div></div>'
-  +'<div class="form-row"><label>优先级</label><input id="r-pri" type="number" value="'+esc(r.priority||0)+'"></div>'
+  +'<div class="form-row"><div style="flex:1"><label>优先级</label><input id="r-pri" type="number" value="'+esc(r.priority||0)+'"></div><div style="flex:1"><label>模型映射（agent模型=上游模型）</label><input id="r-map" value="'+esc(modelMapToText(r.model_map))+'"></div></div>'
   +'<button class="btn" onclick="submitEditRoute(\\''+esc(id)+'\\')">保存</button>');};
-window.submitEditRoute=function(id){api('PUT','/admin/api/routes/'+id,{name:document.getElementById('r-name').value,pattern:document.getElementById('r-pattern').value,providers:document.getElementById('r-prov').value.split(',').map(function(s){return s.trim();}).filter(Boolean),fallback:document.getElementById('r-fb').value.split(',').map(function(s){return s.trim();}).filter(Boolean),priority:parseInt(document.getElementById('r-pri').value)||0}).then(function(){closeModal();render_routes(document.getElementById('view'));toast('✅ 已更新');});};
+window.submitEditRoute=function(id){api('PUT','/admin/api/routes/'+id,{name:document.getElementById('r-name').value,pattern:document.getElementById('r-pattern').value,providers:document.getElementById('r-prov').value.split(',').map(function(s){return s.trim();}).filter(Boolean),fallback:document.getElementById('r-fb').value.split(',').map(function(s){return s.trim();}).filter(Boolean),priority:parseInt(document.getElementById('r-pri').value)||0,model_map:parseModelMap(document.getElementById('r-map').value)}).then(function(){closeModal();render_routes(document.getElementById('view'));toast('✅ 已更新');});};
 window.deleteRoute=function(id){if(!confirm('确认删除？'))return;api('DELETE','/admin/api/routes/'+id).then(function(){render_routes(document.getElementById('view'));toast('🗑️ 已删除');});};
+// 模型映射：文本 "a=b, c=d" ⇄ 对象 {a:'b',c:'d'}
+function parseModelMap(txt){var o={};String(txt||'').split(/[,，\\n]/).forEach(function(p){var i=p.indexOf('=');if(i>0){var k=p.slice(0,i).trim(),v=p.slice(i+1).trim();if(k&&v)o[k]=v;}});return o;}
+function modelMapToText(mm){var out=[];for(var k in (mm||{})){if(Object.prototype.hasOwnProperty.call(mm,k))out.push(k+'='+mm[k]);}return out.join(', ');}
 
 // ---- Keys ----
 function render_keys(main){
@@ -977,7 +1189,7 @@ function render_guide(main){
 function render_guide_mini(){
   var mount=document.getElementById('guide-mount');
   if(!mount) return;
-  mount.innerHTML='<div class="panel" style="border-color:var(--accent)"><h3>👋 欢迎使用 iRouter v3.2.0（Cloudflare D1 版）</h3><div id="guide-mini-body"></div><button class="btn ghost" onclick="document.getElementById(\\'guide-mount\\').innerHTML=\\'\\'">关闭</button></div>';
+  mount.innerHTML='<div class="panel" style="border-color:var(--accent)"><h3>👋 欢迎使用 iRouter v3.3.0（Cloudflare D1 版）</h3><div id="guide-mini-body"></div><button class="btn ghost" onclick="document.getElementById(\\'guide-mount\\').innerHTML=\\'\\'">关闭</button></div>';
   render_guide_content(document.getElementById('guide-mini-body'), true);
   if(!localStorage.getItem('irouter_guide_dismissed')){
     setTimeout(function(){var b=document.getElementById('guide-mini-body');if(b) render_guide_content(b,true);},50);
@@ -1000,18 +1212,40 @@ function render_guide_content(el, mini){
   if(!mini) localStorage.setItem('irouter_guide_dismissed','1');
 }
 
-// ---- 登录 ----
+// ---- 登录 / 首次初始化 ----
 function render_login(){
   var ab = document.getElementById('appbar');
   if(ab) ab.style.display='none';
   document.getElementById('view').innerHTML='<div class="login-box">'
     +'<h2 style="text-align:center;margin-bottom:24px">🔐 iRouter 管理后台</h2>'
     +'<label style="font-size:12px;color:var(--muted)">管理员密码</label>'
-    +'<input id="login-pass" type="password" style="width:100%;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:10px;border-radius:10px;margin:8px 0 16px" placeholder="请输入密码">'
+    +'<input id="login-pass" type="password" style="width:100%;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:10px;border-radius:10px;margin:8px 0 16px" placeholder="请输入密码" onkeydown="if(event.key===\\'Enter\\')doLogin()">'
     +'<button class="btn" style="width:100%;padding:11px" onclick="doLogin()">登录</button>'
-    +'<p style="font-size:11px;color:var(--muted);margin-top:16px;text-align:center">默认密码见环境变量 DEFAULT_ADMIN_PASS</p></div>';
+    +'<p style="font-size:11px;color:var(--muted);margin-top:16px;text-align:center">凭据来自环境变量（DEFAULT_ADMIN_PASS / SESSION_SECRET）或首次初始化</p></div>';
 }
-window.doLogin=function(){api('POST','/admin/api/login',{password:document.getElementById('login-pass').value}).then(function(){toast('✅ 登录成功');render();}).catch(function(e){toast('❌ '+(e&&e.error||'登录失败'));});};
+window.doLogin=function(){api('POST','/admin/api/login',{password:document.getElementById('login-pass').value}).then(function(){toast('✅ 登录成功');render();startAutoRefresh();}).catch(function(e){toast('❌ '+((e&&e.error)||e||'登录失败'));});};
+
+// 未初始化（缺管理密码/会话密钥）时渲染快速初始化表单 —— 开箱即用，无需先配置环境变量
+function render_setup(){
+  var ab = document.getElementById('appbar');
+  if(ab) ab.style.display='none';
+  document.getElementById('view').innerHTML='<div class="login-box">'
+    +'<h2 style="text-align:center;margin-bottom:6px">🚀 iRouter 快速初始化</h2>'
+    +'<p style="text-align:center;font-size:12px;color:var(--muted);margin-bottom:20px">首次部署请在此设置后台凭据，立即开始使用（已配置环境变量则可直接登录）</p>'
+    +'<label style="font-size:12px;color:var(--muted)">管理员密码（至少 6 位）</label>'
+    +'<input id="s-pass" type="password" style="width:100%;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:10px;border-radius:10px;margin:8px 0 14px" placeholder="设置登录密码">'
+    +'<label style="font-size:12px;color:var(--muted)">会话密钥 Session Secret（至少 12 位随机串）</label>'
+    +'<div style="display:flex;gap:8px;margin:8px 0 20px"><input id="s-secret" type="text" style="flex:1;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:10px;border-radius:10px" placeholder="如 8J3k9xQ2LmNp"><button class="btn ghost" onclick="genSecret()">🎲 随机生成</button></div>'
+    +'<button class="btn" style="width:100%;padding:11px" onclick="doSetup()">完成初始化，去登录</button>'
+    +'<p style="font-size:11px;color:var(--muted);margin-top:14px;text-align:center">凭据仅加密存储于 D1 数据库 meta 中，不占环境变量</p></div>';
+}
+window.genSecret=function(){var c='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';var s='';for(var i=0;i<24;i++)s+=c[Math.floor(Math.random()*c.length)];document.getElementById('s-secret').value=s;};
+window.doSetup=function(){
+  var p=document.getElementById('s-pass').value, s=document.getElementById('s-secret').value.trim();
+  if(p.length<6){toast('❌ 密码至少 6 位');return;}
+  if(s.length<12){toast('❌ 会话密钥至少 12 位');return;}
+  api('POST','/admin/api/bootstrap',{password:p,session_secret:s}).then(function(){toast('✅ 初始化完成，请登录');render_login();}).catch(function(e){toast('❌ '+((e&&e.error)||e||'初始化失败'));});
+};
 
 // ---- 模态框 ----
 function setModal(html){document.getElementById('modal-box').innerHTML=html+'<div style="margin-top:16px;text-align:right"><button class="btn ghost" onclick="closeModal()">取消</button></div>';document.getElementById('modal').className='modal show';}
@@ -1038,8 +1272,11 @@ startAutoRefresh();
 (function init(){
   if(location.hash) currentView=location.hash.replace('#','');
   if(TITLES[currentView]){var a=document.querySelector('.nav a[data-view="'+currentView+'"]');if(a)a.classList.add('active');}
-  // 简单是否已登录探测：直接尝试加载 dashboard，401 则弹登录
-  api('GET','/admin/api/dashboard').then(function(){render();}).catch(function(){render_login();});
+  // 未初始化 → 快速初始化表单；未登录 → 登录表单；已登录 → 主界面
+  api('GET','/admin/api/bootstrap').then(function(d){
+    if(d && d.required) return render_setup();
+    api('GET','/admin/api/dashboard').then(function(){render();startAutoRefresh();}).catch(function(){render_login();});
+  }).catch(function(){render_login();});
 })();
 </script>
 </body></html>`;
