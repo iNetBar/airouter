@@ -1,4 +1,4 @@
-// worker.ts — iRouter v3.5.0 (Cloudflare Workers + D1)
+// worker.ts — iRouter v3.6.0 (Cloudflare Workers + D1)
 // 相比 v3.0 (KV 版) 的变化：存储层从 Deno KV / Workers KV 全部迁移到 D1 (db.ts)
 // Hono 路由定义、API 路径、前端 dashboard.html 完全不变（路由层/前端零改动）
 
@@ -188,7 +188,7 @@ export default {
         ctx.waitUntil(builtinsInit);
 
         // ---------- 健康检查 ----------
-        app.get('/health', (c) => c.json({ ok: true, version: '3.5.0', storage: 'd1' }));
+        app.get('/health', (c) => c.json({ ok: true, version: '3.6.0', storage: 'd1' }));
 
         // =================================================================
         // 代理转发（流式透传，CPU < 5ms，不 buffer 完整响应）
@@ -445,7 +445,7 @@ export default {
             });
 
             return c.json({
-                version: '3.5.0',
+                version: '3.6.0',
                 generatedAt: Date.now(),
                 storage: { mode: 'd1', writable: true, warning: null },
                 counts: { providers: providers.length, routes: routes.length, keys: keys.length },
@@ -469,6 +469,13 @@ export default {
                 baseUrl: s.baseUrl || env.BASE_URL || '',
                 apiToken: s.tokenMasked || maskToken(env.API_TOKEN || ''),
             });
+        });
+
+        // API：在线聊天页获取明文调用 Token（仅管理员，用于直接调 /v1/chat/completions 验证转发链路）
+        app.get('/admin/api/token', async (c) => {
+            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
+            const s = await db.getSettings(env.DB);
+            return c.json({ token: s.apiToken || env.API_TOKEN || '' });
         });
 
         app.put('/admin/api/settings', async (c) => {
@@ -611,6 +618,18 @@ export default {
             } catch (e) {
                 return c.json({ ok: false, message: `请求失败：${(e as Error).message}` });
             }
+        });
+
+        // API：在线聊天页获取指定供应商可用模型（内置目录优先，自定义 go probeProviderModels 60s 缓存）
+        app.get('/admin/api/providers/:id/models', async (c) => {
+            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
+            const id = c.req.param('id');
+            const p = await db.getProvider(env.DB, id);
+            if (!p) return err(404, '供应商不存在');
+            const builtin = MODEL_CATALOG[p.id];
+            if (builtin?.length) return c.json({ models: builtin });
+            const models = await probeProviderModels(env, p);
+            return c.json({ models });
         });
 
         // =================================================================
@@ -872,6 +891,19 @@ const ADMIN_HTML = `<!DOCTYPE html>
   .modal-actions .btn:first-child{border-radius:999px 0 0 999px!important}
   .modal-actions .btn:last-child{border-radius:0 999px 999px 0!important}
   .modal-actions .btn.ghost{margin-left:-1px!important;border-left:none}
+  /* 在线聊天：对话气泡与输入区 */
+  .chat-msgs{display:flex;flex-direction:column;gap:10px;max-height:52vh;overflow-y:auto;padding:2px 0}
+  .chat-msg{max-width:78%;padding:10px 14px;border-radius:14px;font-size:13px;white-space:pre-wrap;word-break:break-word;line-height:1.7;border:1px solid var(--border)}
+  .chat-msg .who{font-size:11px;color:var(--muted);margin-bottom:4px}
+  .chat-msg.user{background:var(--active-bg);align-self:flex-end;border-bottom-right-radius:4px}
+  .chat-msg.ai{background:var(--input-bg);align-self:flex-start;border-bottom-left-radius:4px}
+  .chat-msg.ai.loading::after{content:"⏳";animation:blink 1.2s infinite;display:inline-block}
+  @keyframes blink{50%{opacity:.25}}
+  .chat-msg.err-bubble{border-color:var(--danger)!important;color:var(--err-fg)}
+  .chat-input{display:flex;gap:10px;margin-top:16px;align-items:flex-end}
+  .chat-input textarea{flex:1;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:10px 14px;border-radius:12px;resize:vertical;font-family:inherit;font-size:13px;min-height:56px}
+  .chat-input textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--active-bg)}
+  .chat-meta{font-size:11px;color:var(--muted);margin-top:10px;text-align:right}
   .form-row{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap}
   .form-row label{font-size:12px;color:var(--muted);display:block;margin-bottom:4px}
   .form-row input,.form-row select{flex:1;min-width:160px;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:8px 12px;border-radius:10px;transition:border-color .15s,box-shadow .15s}
@@ -930,11 +962,12 @@ const ADMIN_HTML = `<!DOCTYPE html>
 </div>
 <div class="layout">
   <aside class="sidebar">
-    <div class="brand"><div class="brand-text"><h1>iRouter<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button></h1><small>智能路由网关 v3.5.0</small></div></div>
+    <div class="brand"><div class="brand-text"><h1>iRouter<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button></h1><small>智能路由网关 v3.6.0</small></div></div>
     <nav class="nav">
       <a href="#dashboard" class="active" data-view="dashboard">🏠 首页</a>
       <a href="#providers" data-view="providers">⚙️ 供应商</a>
       <a href="#routes" data-view="routes">🔀 路由规则</a>
+      <a href="#chat" data-view="chat">💬 在线聊天</a>
       <a href="#settings" data-view="settings">🛠️ 系统设置</a>
       <a href="#guide" data-view="guide">❔ 使用指南</a>
       <a href="#" id="logout"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 2v10"></path><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path></svg>&nbsp;退出</a>
@@ -1003,7 +1036,7 @@ window.api = function(method, path, body){
 };
 
 // ============ 视图渲染 ============
-var TITLES = {dashboard:'管理首页',providers:'供应商',routes:'路由规则',settings:'系统设置',guide:'使用指南'};
+var TITLES = {dashboard:'管理首页',providers:'供应商',routes:'路由规则',chat:'在线聊天',settings:'系统设置',guide:'使用指南'};
 var currentView = 'dashboard';
 var state = {providers:[],routes:[],keys:[],settings:null};
 
@@ -1019,6 +1052,7 @@ function render(){
   if(v==='dashboard') return render_dashboard(main);
   if(v==='providers') return render_providers(main);
   if(v==='routes') return render_routes(main);
+  if(v==='chat') return render_chat(main);
   if(v==='settings') return render_settings(main);
   if(v==='guide') return render_guide(main);
 }
@@ -1109,6 +1143,136 @@ function render_recent(list){
 }
 
 // ---- 系统设置（原「调用信息」：连接信息 + Token + 系统初始化 + 改密码）----
+// ---- 在线聊天：选择供应商/模型，经网关 /v1/chat/completions 真实转发测试（Token 鉴权 + 路由匹配 + 上游转发）----
+var chatState={providers:[],token:'',msgs:[]};
+function render_chat(main){
+  main.innerHTML = ''
+    + '<div class="topbar"><h2>💬 在线聊天</h2><button class="btn ghost" onclick="chatClear()">🗑️ 清空对话</button></div>'
+    + '<div class="panel">'
+    + '<div class="form-row"><div style="flex:1">'
+    + '<label>供应商（仅列出已启用供应商）</label><select id="ch-prov" onchange="chatOnProv()"><option value="">— 选择供应商 —</option></select>'
+    + '</div><div style="flex:1">'
+    + '<label>模型（该供应商支持的模型；可手动输入）</label><div style="display:flex;gap:8px"><select id="ch-model" style="flex:1" onchange="chatOnModel()"><option value="">— 选择模型 —</option></select><input id="ch-model-custom" style="flex:1;display:none" placeholder="手动输入模型名，如 gpt-4o-mini"></div>'
+    + '</div></div>'
+    + '<div class="form-row"><div style="flex:1"><label>系统提示词（可选）</label><input id="ch-sys" placeholder="例如：你是一个乐于助人的助手"></div></div>'
+    + '<div id="ch-hint" style="font-size:12px;color:var(--muted)">选择供应商与模型后发送消息：请求走 <code>/v1/chat/completions</code>（调用 Token 鉴权 + 路由规则匹配 + 上游供应商转发），可验证整条链路。多轮上下文自动保留，可随时「清空对话」。</div>'
+    + '</div>'
+    + '<div class="panel"><div class="chat-msgs" id="chat-msgs"><div class="chat-msg ai">💬 选择一个模型，输入消息开始在线聊天测试；多轮上下文自动保留，可随时「清空对话」。</div></div>'
+    + '<div class="chat-input"><textarea id="chat-text" rows="2" placeholder="输入消息，Enter 发送 / Shift+Enter 换行"></textarea><button class="btn" id="chat-send" onclick="chatSend()">🚀 发送</button></div>'
+    + '<div class="chat-meta" id="chat-meta"></div>'
+    + '</div>';
+  chatState.msgs=[];
+  document.getElementById('chat-text').addEventListener('keydown',function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();chatSend();}});
+  chatLoad();
+}
+function chatLoad(){
+  Promise.all([
+    api('GET','/admin/api/providers').then(function(d){chatState.providers=(d&&d.data)||d||[];}).catch(function(){chatState.providers=[];}),
+    api('GET','/admin/api/token').then(function(d){chatState.token=(d&&d.token)||'';}).catch(function(){chatState.token='';})
+  ]).then(function(){
+    var list=chatState.providers.filter(function(p){return p.enabled;});
+    document.getElementById('ch-prov').innerHTML='<option value="">— 选择供应商 —</option>'+list.map(function(p){return '<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>';}).join('');
+    var hint=document.getElementById('ch-hint');
+    if(!list.length) hint.innerHTML='⚠️ 暂无已启用的供应商，请先到「供应商」页添加并启用。';
+    else if(!chatState.token) hint.innerHTML='⚠️ 未获取到调用 Token：请先到「🛠️ 系统设置」配置调用 Token。';
+  });
+}
+function chatOnProv(){
+  var pid=document.getElementById('ch-prov').value;
+  var modelEl=document.getElementById('ch-model');
+  modelEl.innerHTML='<option value="">— 选择模型 —</option>';
+  var custom=document.getElementById('ch-model-custom');custom.style.display='none';custom.value='';
+  if(!pid) return;
+  api('GET','/admin/api/providers/'+encodeURIComponent(pid)+'/models').then(function(d){
+    var list=(d&&d.models)||[];
+    if(list.length){
+      modelEl.innerHTML='<option value="">— 选择模型 —</option>'+list.map(function(m){return '<option value="'+esc(m)+'">'+esc(m)+'</option>';}).join('')+'<option value="__custom__">✍️ 手动输入</option>';
+    }else{
+      modelEl.innerHTML='<option value="">— 选择模型 —</option><option value="__custom__">✍️ 手动输入</option>';
+      document.getElementById('ch-hint').textContent='该供应商暂无已知模型（未配置 Key 或探测失败），可手动输入模型名测试。';
+    }
+  }).catch(function(){});
+}
+function chatOnModel(){
+  var v=document.getElementById('ch-model').value;
+  var c=document.getElementById('ch-model-custom');
+  if(v==='__custom__'){c.style.display='';c.focus();}else{c.style.display='none';}
+}
+function chatCurrentModel(){
+  var v=document.getElementById('ch-model').value;
+  return v==='__custom__'?document.getElementById('ch-model-custom').value.trim():v;
+}
+function chatAddMsg(role,html,extra){
+  var box=document.getElementById('chat-msgs');
+  var d=document.createElement('div');
+  d.className='chat-msg '+role+(extra?(' '+extra):'');
+  d.innerHTML='<div class="who">'+(role==='user'?'🧑 我':'🤖 网关')+'</div>'+html;
+  box.appendChild(d);
+  d.scrollIntoView({behavior:'smooth',block:'nearest'});
+  return d;
+}
+function chatSend(){
+  var model=chatCurrentModel();
+  if(!model){toast('请先选择供应商与模型，或手动输入模型名');return;}
+  var text=document.getElementById('chat-text').value.trim();
+  if(!text){toast('请输入消息内容');return;}
+  if(!chatState.token){toast('❌ 未获取到调用 Token：请到「系统设置」配置');return;}
+  var sys=document.getElementById('ch-sys').value.trim();
+  if(chatState.msgs.length===0&&sys) chatState.msgs.push({role:'system',content:sys});
+  chatState.msgs.push({role:'user',content:text});
+  document.getElementById('chat-text').value='';
+  chatAddMsg('user',esc(text));
+  var tip=chatAddMsg('ai','请求中', 'loading');
+  var t0=Date.now();
+  var btn=document.getElementById('chat-send');btn.disabled=true;btn.textContent='⏳ 发送中…';
+  fetch('/v1/chat/completions',{
+    method:'POST',
+    headers:{'content-type':'application/json','authorization':'Bearer '+chatState.token},
+    body:JSON.stringify({model:model,messages:chatState.msgs,stream:false}),
+    credentials:'include'
+  }).then(function(r){
+    return r.json().catch(function(){return {error:{message:'HTTP '+r.status+'：网关返回了不可解析的响应'}};}).then(function(j){return {ok:r.ok,status:r.status,j:j};});
+  }).then(function(res){
+    var ms=Date.now()-t0;
+    var meta=document.getElementById('chat-meta');
+    if(!res.ok){
+      var em=res.j&&res.j.error;
+      var msg=(em&&typeof em==='object'&&em.message)||(typeof em==='string'?em:(res.j&&res.j.message))||('HTTP '+res.status);
+      var hint='';
+      if(res.status===401) hint='（调用 Token 无效或未配置：请到「系统设置」确认）';
+      else if(res.status===404) hint='（未匹配到转发路由：请到「路由规则」添加 pattern 匹配该模型的规则，如 *）';
+      else if(res.status===502) hint='（上游转发失败：请检查供应商 Key 与可用性）';
+      chatState.msgs.pop();
+      tip.className='chat-msg ai err-bubble';
+      tip.innerHTML='<div class="who">🤖 网关</div>'+esc(msg)+hint;
+      meta.textContent='HTTP '+res.status+' · '+ms+'ms';
+      return;
+    }
+    var choice=res.j&&res.j.choices&&res.j.choices[0];
+    var m=(choice&&choice.message)||{};
+    var content=(typeof m.content==='string'?m.content:'').trim()||'（空回复：模型未返回 content）';
+    var reasoning=(typeof m.reasoning_content==='string'&&m.reasoning_content.trim())?'<div class="who">🧠 思考（reasoning_content）</div>'+esc(m.reasoning_content).replace(/\\n/g,'<br>')+'<br>':'';
+    var usage=(res.j&&res.j.usage)?(' · '+(res.j.usage.prompt_tokens||0)+'→'+(res.j.usage.completion_tokens||0)+' tokens'):'';
+    tip.className='chat-msg ai';
+    tip.innerHTML='<div class="who">🤖 '+esc(model)+usage+'</div>'+reasoning+esc(content).replace(/\\n/g,'<br>');
+    chatState.msgs.push({role:'assistant',content:content});
+    meta.textContent='✅ 回复完成 · '+ms+'ms · HTTP 200';
+  }).catch(function(e){
+    chatState.msgs.pop();
+    tip.className='chat-msg ai err-bubble';
+    tip.innerHTML='<div class="who">🤖 网关</div>请求失败：'+esc((e&&e.message)||String(e));
+  }).then(function(){
+    btn.disabled=false;btn.textContent='🚀 发送';
+  });
+}
+function chatClear(){
+  chatState.msgs=[];
+  document.getElementById('chat-msgs').innerHTML='<div class="chat-msg ai">💬 对话已清空，可重新开始。</div>';
+  var el=document.getElementById('chat-meta');if(el)el.textContent='';
+  el=document.getElementById('ch-sys');if(el)el.value='';
+  el=document.getElementById('chat-text');if(el)el.value='';
+}
+
 function render_settings(main){
   main.innerHTML = '<div class="topbar"><h2>🛠️ 系统设置</h2><button class="btn ghost" onclick="openReinit()">🔁 系统初始化</button></div>'
     + '<div class="conn-card" id="conn"></div>'
@@ -1135,7 +1299,7 @@ function render_conn(s){
            + '  -H "Content-Type: application/json" \\\\\\n'
            + '  -d \\'{ "model": "gpt-4o-mini", "messages": [{"role":"user","content":"hello"}] }\\'';
   document.getElementById('conn').innerHTML = ''
-    + row_html('🏷️ 项目名', esc(s.projectName||'iRouter')+' <span class="badge ok">v3.5.0 · D1</span>')
+    + row_html('🏷️ 项目名', esc(s.projectName||'iRouter')+' <span class="badge ok">v3.6.0 · D1</span>')
     + row_html('🌐 网关 Base URL', '<code id="conn-url">'+esc(baseUrl)+'</code> <span class="copy" onclick="copyText(\\'conn-url\\')">📋 复制</span>')
     + row_html('🔑 调用 Token', '<code id="conn-token">'+esc(token)+'</code> <span class="copy" onclick="copyText(\\'conn-token\\')">📋 复制</span>')
     + '<div style="margin-top:14px"><label style="font-size:12px;color:var(--muted)">📦 快速调用示例（curl）</label><pre id="conn-curl">'+esc(curl)+'</pre><span class="copy" onclick="copyText(\\'conn-curl\\')">📋 复制</span></div>';
@@ -1307,7 +1471,7 @@ function render_guide(main){
 function render_guide_mini(){
   var mount=document.getElementById('guide-mount');
   if(!mount) return;
-  mount.innerHTML='<div class="panel" style="border-color:var(--accent)"><h3>👋 欢迎使用 iRouter v3.5.0（Cloudflare D1 版）</h3><div id="guide-mini-body"></div><button class="btn ghost" onclick="document.getElementById(\\'guide-mount\\').innerHTML=\\'\\'">关闭</button></div>';
+  mount.innerHTML='<div class="panel" style="border-color:var(--accent)"><h3>👋 欢迎使用 iRouter v3.6.0（Cloudflare D1 版）</h3><div id="guide-mini-body"></div><button class="btn ghost" onclick="document.getElementById(\\'guide-mount\\').innerHTML=\\'\\'">关闭</button></div>';
   render_guide_content(document.getElementById('guide-mini-body'), true);
   if(!localStorage.getItem('irouter_guide_dismissed')){
     setTimeout(function(){var b=document.getElementById('guide-mini-body');if(b) render_guide_content(b,true);},50);
