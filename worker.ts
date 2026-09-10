@@ -1,4 +1,4 @@
-// worker.ts — iRouter v3.4.0 (Cloudflare Workers + D1)
+// worker.ts — iRouter v3.5.0 (Cloudflare Workers + D1)
 // 相比 v3.0 (KV 版) 的变化：存储层从 Deno KV / Workers KV 全部迁移到 D1 (db.ts)
 // Hono 路由定义、API 路径、前端 dashboard.html 完全不变（路由层/前端零改动）
 
@@ -188,7 +188,7 @@ export default {
         ctx.waitUntil(builtinsInit);
 
         // ---------- 健康检查 ----------
-        app.get('/health', (c) => c.json({ ok: true, version: '3.4.0', storage: 'd1' }));
+        app.get('/health', (c) => c.json({ ok: true, version: '3.5.0', storage: 'd1' }));
 
         // =================================================================
         // 代理转发（流式透传，CPU < 5ms，不 buffer 完整响应）
@@ -196,7 +196,7 @@ export default {
         // 鉴权：PROXY_KEY 优先；未配置时回退后台「调用信息」Token；两者都无则拒绝（绝不无鉴权放行）
         const gwToken = env.PROXY_KEY || (await getSettingsCached(env)).apiToken;
         app.use('/v1/*', async (c, next) => {
-            if (!gwToken) return err(500, '网关 Token 未配置：请设置 PROXY_KEY 环境变量，或在管理后台「调用信息」中设置 Token', 'gateway_not_configured');
+            if (!gwToken) return err(500, '网关 Token 未配置：请设置 PROXY_KEY 环境变量，或在管理后台「系统设置」中设置 Token', 'gateway_not_configured');
             const auth = c.req.header('authorization') || '';
             const token = auth.replace(/^Bearer\s+/i, '');
             if (!token || token !== gwToken) return err(401, 'Unauthorized', 'authentication_error');
@@ -445,7 +445,7 @@ export default {
             });
 
             return c.json({
-                version: '3.4.0',
+                version: '3.5.0',
                 generatedAt: Date.now(),
                 storage: { mode: 'd1', writable: true, warning: null },
                 counts: { providers: providers.length, routes: routes.length, keys: keys.length },
@@ -502,7 +502,13 @@ export default {
         // =================================================================
         app.get('/admin/api/providers', async (c) => {
             if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
-            return c.json(await db.getProviders(env.DB));
+            const providers = await db.getProviders(env.DB);
+            const keys = await db.getKeys(env.DB);   // 全部 Key（secret 密文剥离，仅回传摘要）
+            return c.json(providers.map(p => ({
+                ...p,
+                keysBrief: keys.filter(k => k.provider_id === p.id)
+                    .map(k => ({ id: k.id, name: k.name, masked: k.masked, hint: k.hint, last_used: k.last_used })),
+            })));
         });
         app.post('/admin/api/providers', async (c) => {
             if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
@@ -520,6 +526,19 @@ export default {
                 updated_at: Math.floor(Date.now() / 1000),
             };
             await db.saveProvider(env.DB, p);
+            // API Key 合并进供应商：创建时可直接携带 key（AES-GCM 加密存储）
+            const rawKey = String(body.key || '').trim();
+            if (rawKey) {
+                const ek = await getEncryptKey(env);
+                if (!ek) return err(500, '加密密钥暂不可用，请重试');
+                const k: db.KeyRow = {
+                    id: 'k_' + Date.now(), name: body.keyName || '',
+                    provider_id: p.id, secret: await encrypt(rawKey, ek),
+                    hint: rawKey.slice(-4), masked: '****' + rawKey.slice(-4),
+                    created_at: Math.floor(Date.now() / 1000), last_used: 0,
+                };
+                await db.saveKey(env.DB, k);
+            }
             return c.json({ ok: true, id: p.id }, 201);
         });
         app.put('/admin/api/providers/:id', async (c) => {
@@ -538,6 +557,23 @@ export default {
                 updated_at: Math.floor(Date.now() / 1000),
             };
             await db.saveProvider(env.DB, next);
+            // 追加新 Key（可选）
+            const rawKey = String(body.key || '').trim();
+            if (rawKey) {
+                const ek = await getEncryptKey(env);
+                if (!ek) return err(500, '加密密钥暂不可用，请重试');
+                const k: db.KeyRow = {
+                    id: 'k_' + Date.now(), name: body.keyName || '',
+                    provider_id: id, secret: await encrypt(rawKey, ek),
+                    hint: rawKey.slice(-4), masked: '****' + rawKey.slice(-4),
+                    created_at: Math.floor(Date.now() / 1000), last_used: 0,
+                };
+                await db.saveKey(env.DB, k);
+            }
+            // 移除指定 Key（remove_keys：单个 id 字符串或数组）
+            const rm = body.remove_keys;
+            const rmList = Array.isArray(rm) ? rm : (typeof rm === 'string' && rm ? [rm] : []);
+            for (const kid of rmList) { if (kid) await db.deleteKey(env.DB, String(kid)); }
             return c.json({ ok: true });
         });
         app.delete('/admin/api/providers/:id', async (c) => {
@@ -822,6 +858,20 @@ const ADMIN_HTML = `<!DOCTYPE html>
   .btn.ghost{background:transparent;border:1px solid var(--border);color:var(--nav)}
   .btn.ghost:hover{background:var(--nav-hover);color:var(--fg);filter:none}
   .btn.danger{background:var(--danger)}
+  /* 操作胶囊下拉菜单：列表操作列多按钮合并为一个胶囊按钮，点击展开菜单 */
+  .op-wrap{position:relative;display:inline-block;vertical-align:middle}
+  .op-drop{display:none;position:absolute;right:0;top:calc(100% + 6px);background:var(--panel);border:1px solid var(--border);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.25);min-width:148px;z-index:60;overflow:hidden;padding:4px}
+  .op-wrap.open .op-drop{display:block}
+  .op-drop button{display:block;width:100%;text-align:left;background:none;border:none;color:var(--fg);font-size:13px;padding:8px 12px;border-radius:8px;cursor:pointer;font-family:inherit}
+  .op-drop button:hover{background:var(--nav-hover)}
+  .op-drop button.danger{color:var(--danger)}
+  .op-drop button.danger:hover{background:var(--err-bg)}
+  /* 弹窗底部按钮组：保存+取消 拼接为单个胶囊分节按钮 */
+  .modal-actions{display:flex;justify-content:flex-end;margin-top:16px}
+  .modal-actions .btn{border-radius:0!important;margin:0!important}
+  .modal-actions .btn:first-child{border-radius:999px 0 0 999px!important}
+  .modal-actions .btn:last-child{border-radius:0 999px 999px 0!important}
+  .modal-actions .btn.ghost{margin-left:-1px!important;border-left:none}
   .form-row{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap}
   .form-row label{font-size:12px;color:var(--muted);display:block;margin-bottom:4px}
   .form-row input,.form-row select{flex:1;min-width:160px;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:8px 12px;border-radius:10px;transition:border-color .15s,box-shadow .15s}
@@ -880,13 +930,12 @@ const ADMIN_HTML = `<!DOCTYPE html>
 </div>
 <div class="layout">
   <aside class="sidebar">
-    <div class="brand"><div class="brand-text"><h1>iRouter<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button></h1><small>智能路由网关 v3.4.0</small></div></div>
+    <div class="brand"><div class="brand-text"><h1>iRouter<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button></h1><small>智能路由网关 v3.5.0</small></div></div>
     <nav class="nav">
       <a href="#dashboard" class="active" data-view="dashboard">🏠 首页</a>
       <a href="#providers" data-view="providers">⚙️ 供应商</a>
       <a href="#routes" data-view="routes">🔀 路由规则</a>
-      <a href="#keys" data-view="keys">🔑 API Keys</a>
-      <a href="#settings" data-view="settings">⚡ 调用信息</a>
+      <a href="#settings" data-view="settings">🛠️ 系统设置</a>
       <a href="#guide" data-view="guide">❔ 使用指南</a>
       <a href="#" id="logout"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 2v10"></path><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path></svg>&nbsp;退出</a>
     </nav>
@@ -954,7 +1003,7 @@ window.api = function(method, path, body){
 };
 
 // ============ 视图渲染 ============
-var TITLES = {dashboard:'管理首页',providers:'供应商',routes:'路由规则',keys:'API Keys',settings:'调用信息',guide:'使用指南'};
+var TITLES = {dashboard:'管理首页',providers:'供应商',routes:'路由规则',settings:'系统设置',guide:'使用指南'};
 var currentView = 'dashboard';
 var state = {providers:[],routes:[],keys:[],settings:null};
 
@@ -970,7 +1019,6 @@ function render(){
   if(v==='dashboard') return render_dashboard(main);
   if(v==='providers') return render_providers(main);
   if(v==='routes') return render_routes(main);
-  if(v==='keys') return render_keys(main);
   if(v==='settings') return render_settings(main);
   if(v==='guide') return render_guide(main);
 }
@@ -1008,7 +1056,7 @@ function render_setup_hint(data){
   if(!el) return;
   var counts = data.counts||{}, providers = data.providers||[];
   var tips = [];
-  if(!(counts.keys||0)) tips.push('① 前往【API Keys】添加至少一个供应商的真实 Key（AES-GCM 加密存储）');
+  if(!(counts.keys||0)) tips.push('① 前往【供应商】页，为至少一家供应商填入真实 Key（AES-GCM 加密存储）');
   else if(!(counts.routes||0)) tips.push('① 前往【路由规则】添加一条规则（如 pattern=<code>*</code> + 命中供应商），未匹配模型将返回明确 404');
   if(!providers.some(function(p){return p.enabled;})) tips.push('② 在【供应商】页启用至少一家供应商（点击状态徽章可切换）');
   if(!(counts.keys||0)&&!(counts.routes||0)) tips.push('② 再到【路由规则】建默认路由，即可用 <code>/v1</code> 直接发起调用');
@@ -1024,7 +1072,7 @@ function render_cards(data){
   c.innerHTML = ''
     + card('⚙️ 供应商', (data.counts||{}).providers||0, '已启用 '+(data.providers||[]).filter(function(p){return p.enabled;}).length)
     + card('🔀 路由规则', (data.counts||{}).routes||0, '按优先级匹配')
-    + card('🔑 API Keys', (data.counts||{}).keys||0, '加密存储')
+    + card('🔑 Keys', (data.counts||{}).keys||0, '加密存储')
     + card('🚀 总请求', s.totalRequests||0, '成功率 '+(s.successRate||0)+'%');
 }
 
@@ -1060,9 +1108,9 @@ function render_recent(list){
   }).join('') || '<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:20px">暂无请求记录</td></tr>';
 }
 
-// ---- 调用信息（总览页核心：Base URL + Token + 修改）----
+// ---- 系统设置（原「调用信息」：连接信息 + Token + 系统初始化 + 改密码）----
 function render_settings(main){
-  main.innerHTML = '<div class="topbar"><h2>⚡ 调用信息</h2></div>'
+  main.innerHTML = '<div class="topbar"><h2>🛠️ 系统设置</h2><button class="btn ghost" onclick="openReinit()">🔁 系统初始化</button></div>'
     + '<div class="conn-card" id="conn"></div>'
     + '<div class="panel" style="margin-top:24px"><h3>📝 修改配置</h3><div id="settings-form"></div></div>'
     + '<div class="panel" style="margin-top:24px"><h3>🔑 修改登录密码</h3><div id="pwd-form"></div></div>';
@@ -1087,7 +1135,7 @@ function render_conn(s){
            + '  -H "Content-Type: application/json" \\\\\\n'
            + '  -d \\'{ "model": "gpt-4o-mini", "messages": [{"role":"user","content":"hello"}] }\\'';
   document.getElementById('conn').innerHTML = ''
-    + row_html('🏷️ 项目名', esc(s.projectName||'iRouter')+' <span class="badge ok">v3.4.0 · D1</span>')
+    + row_html('🏷️ 项目名', esc(s.projectName||'iRouter')+' <span class="badge ok">v3.5.0 · D1</span>')
     + row_html('🌐 网关 Base URL', '<code id="conn-url">'+esc(baseUrl)+'</code> <span class="copy" onclick="copyText(\\'conn-url\\')">📋 复制</span>')
     + row_html('🔑 调用 Token', '<code id="conn-token">'+esc(token)+'</code> <span class="copy" onclick="copyText(\\'conn-token\\')">📋 复制</span>')
     + '<div style="margin-top:14px"><label style="font-size:12px;color:var(--muted)">📦 快速调用示例（curl）</label><pre id="conn-curl">'+esc(curl)+'</pre><span class="copy" onclick="copyText(\\'conn-curl\\')">📋 复制</span></div>';
@@ -1099,10 +1147,16 @@ function render_settings_form(s){
   document.getElementById('settings-form').innerHTML = ''
     + '<div class="form-row"><div style="flex:1"><label>项目名</label><input id="f-project" value="'+esc(s.projectName||'iRouter')+'"></div>'
     + '<div style="flex:1"><label>网关 Base URL（留空=自动取当前域名并补 /v1）</label><input id="f-base" value="'+esc(s.baseUrl||'')+'" placeholder="https://irouter.pages.dev"></div></div>'
-    + '<div class="form-row"><div style="flex:1"><label>调用 Token（留空=不修改；≥8 位可更新；与登录密码相互独立）</label><input id="f-token" type="password" placeholder="sk-xxxxxxxx（留空则不修改）"></div></div>'
+    + '<div class="form-row"><div style="flex:1"><label>调用 Token（外部调用网关用的鉴权 key，留空=不修改；≥8 位可更新）</label><div style="display:flex;gap:8px"><input id="f-token" type="password" style="flex:1" placeholder="sk-xxxxxxxx（留空则不修改）"><button class="btn ghost" onclick="genApiToken()">🎲 自动生成</button></div></div></div>'
     + '<button class="btn" onclick="saveSettings()">💾 保存</button>'
-    + '<span style="margin-left:12px;font-size:12px;color:var(--muted)">提示：此 Token 是「外部调用网关」用的鉴权 key，与管理员登录密码是两套，互不影响</span>';
+    + '<span style="margin-left:12px;font-size:12px;color:var(--muted)">Token 与管理员登录密码相互独立；自动生成后点「保存」生效并刷新展示。</span>';
 }
+window.genApiToken=function(){
+  var c='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';var s='sk-';
+  for(var i=0;i<32;i++)s+=c[Math.floor(Math.random()*c.length)];
+  var el=document.getElementById('f-token');if(!el)return;
+  el.value=s;toast('🎲 已自动生成新 Token，点击「保存」生效');
+};
 
 window.saveSettings = function(){
   var body = {
@@ -1139,23 +1193,40 @@ window.changePassword=function(){
 
 window.copyText = function(id){var el=document.getElementById(id);var txt=el.textContent||el.innerText;navigator.clipboard.writeText(txt).then(function(){toast('📋 已复制');},function(){toast('复制失败，请手动选择');});};
 
-// ---- 供应商 ----
+// ---- 供应商（Key 已并入供应商：增改表单直接填写/管理 Key）----
 function render_providers(main){
   main.innerHTML = '<div class="topbar"><h2>⚙️ 供应商</h2><button class="btn" onclick="openProvider()">＋ 添加供应商</button></div>'
-    + '<div class="panel"><div class="table-scroll"><table><thead><tr><th>名称</th><th>标识</th><th>Base URL</th><th>协议</th><th>内置</th><th>状态</th><th>操作</th></tr></thead><tbody id="prov-tbody"></tbody></table></div></div>';
+    + '<div class="panel"><div class="table-scroll"><table><thead><tr><th>名称</th><th>标识</th><th>Base URL</th><th>协议</th><th>内置</th><th>Key</th><th>状态</th><th>操作</th></tr></thead><tbody id="prov-tbody"></tbody></table></div></div>';
   api('GET','/admin/api/providers').then(function(d){state.providers=d.data||d;render_prov_table();}).catch(function(e){toast(e&&e.error||e);});
 }
 function render_prov_table(){
   var tb=document.getElementById('prov-tbody');
   tb.innerHTML=state.providers.map(function(p){
+    var kb=(p.keysBrief||[]);
+    var keysText=kb.length?kb.map(function(k){return '<code title="'+esc(k.name||'')+'">'+esc(k.masked||'****')+'</code>';}).join('<br>') : '<span style="color:var(--muted)">未设置</span>';
+    var delBtn=p.builtin?'':'<button class="danger" onclick="deleteProvider(\\''+esc(p.id)+'\\')">🗑️ 删除</button>';
     return '<tr><td>'+esc(p.name)+'</td><td><code>'+esc(p.id)+'</code></td><td><code>'+esc(p.base_url)+'</code></td><td>'+esc(p.protocol)+'</td>'
       + '<td><span class="badge '+(p.builtin?'info':'plain')+'">'+(p.builtin?'内置':'自定义')+'</span></td>'
+      + '<td>'+keysText+'</td>'
       + '<td><span class="badge '+(p.enabled?'ok':'err')+'" style="cursor:pointer" onclick="toggleProvider(\\''+esc(p.id)+'\\')" title="点击切换状态">'+(p.enabled?'启用':'停用')+'</span></td>'
-      + '<td><button class="btn ghost" onclick="testProvider(\\''+esc(p.id)+'\\')">测试</button> '
-      + '<button class="btn ghost" onclick="editProvider(\\''+esc(p.id)+'\\')">编辑</button> '
-      + (p.builtin?'':'<button class="btn danger" onclick="deleteProvider(\\''+esc(p.id)+'\\')">删除</button>')+'</td></tr>';
-  }).join('')||'<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px">暂无供应商</td></tr>';
+      + '<td><div class="op-wrap"><button class="btn ghost" onclick="toggleOp(this)">⚙️ 操作 ▾</button><div class="op-drop">'
+      + '<button onclick="testProvider(\\''+esc(p.id)+'\\')">🧪 测试连接</button>'
+      + '<button onclick="editProvider(\\''+esc(p.id)+'\\')">✏️ 编辑</button>'
+      + delBtn
+      + '</div></div></td></tr>';
+  }).join('')||'<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">暂无供应商</td></tr>';
 }
+// 胶囊操作下拉：点击切换，点击菜单项或页面其它处自动关闭
+window.toggleOp=function(btn){
+  var w=btn.closest('.op-wrap');
+  var was=w.classList.contains('open');
+  document.querySelectorAll('.op-wrap.open').forEach(function(x){x.classList.remove('open');});
+  if(!was) w.classList.add('open');
+};
+document.addEventListener('click',function(e){
+  if(!e.target.closest('.op-wrap')){document.querySelectorAll('.op-wrap.open').forEach(function(x){x.classList.remove('open');});}
+  else if(e.target.closest('.op-drop')){document.querySelectorAll('.op-wrap.open').forEach(function(x){x.classList.remove('open');});}
+});
 window.testProvider=function(id){
   api('POST','/admin/api/providers/'+id+'/test').then(function(r){
     toast((r.ok?'✅ ':'❌ ')+r.message);
@@ -1163,16 +1234,24 @@ window.testProvider=function(id){
     toast('❌ '+(e&&e.error||e));
   });
 };
-window.openProvider=function(){setModal('<h3>添加供应商</h3>'
+window.openProvider=function(){window._delKeys=[];setModal('<h3>添加供应商</h3>'
   +'<div class="form-row"><div style="flex:1"><label>名称</label><input id="m-name"></div><div style="flex:1"><label>标识（唯一 ID）</label><input id="m-id" placeholder="my-provider"></div></div>'
   +'<div class="form-row"><div style="flex:1"><label>Base URL</label><input id="m-url" placeholder="https://api.example.com/v1"></div><div style="flex:1"><label>协议</label><select id="m-proto"><option value="openai">openai</option><option value="anthropic">anthropic</option><option value="gemini">gemini</option><option value="custom">custom</option></select></div></div>'
-  +'<button class="btn" onclick="submitProvider()">保存</button>');};
-window.submitProvider=function(){api('POST','/admin/api/providers',{name:document.getElementById('m-name').value,id:document.getElementById('m-id').value,base_url:document.getElementById('m-url').value,protocol:document.getElementById('m-proto').value}).then(function(){closeModal();render_providers(document.getElementById('view'));toast('✅ 已添加');});};
-window.editProvider=function(id){var p=state.providers.find(function(x){return x.id===id;});if(!p)return;setModal('<h3>编辑供应商</h3>'
+  +'<div class="form-row"><div style="flex:1"><label>API Key（AES-GCM 加密存储，可稍后在编辑中追加）</label><input id="m-key" type="password" placeholder="sk-...（可选）"></div></div>'
+  +'<div class="modal-actions"><button class="btn" onclick="submitProvider()">保存</button></div>');};
+window.submitProvider=function(){api('POST','/admin/api/providers',{name:document.getElementById('m-name').value,id:document.getElementById('m-id').value,base_url:document.getElementById('m-url').value,protocol:document.getElementById('m-proto').value,key:document.getElementById('m-key').value.trim()}).then(function(){closeModal();render_providers(document.getElementById('view'));toast('✅ 已添加');});};
+window.editProvider=function(id){var p=state.providers.find(function(x){return x.id===id;});if(!p)return;window._delKeys=[];
+  var kb=(p.keysBrief||[]).map(function(k){
+    return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><code style="flex:1">'+esc(k.masked||'****')+'</code><span style="color:var(--muted);font-size:12px">'+esc(k.name||'')+'</span><button class="btn ghost" style="padding:2px 10px;font-size:12px" onclick="markDelKey(this,\\''+esc(k.id)+'\\')">移除</button></div>';
+  }).join('')||'<div style="color:var(--muted);font-size:12px;margin-bottom:6px">暂无 Key</div>';
+  setModal('<h3>编辑供应商</h3>'
   +'<div class="form-row"><div style="flex:1"><label>名称</label><input id="m-name" value="'+esc(p.name)+'"></div><div style="flex:1"><label>Base URL</label><input id="m-url" value="'+esc(p.base_url)+'"></div></div>'
-  +'<div class="form-row"><label>启用</label><select id="m-enabled"><option value="1"'+(p.enabled?' selected':'')+'>启用</option><option value="0"'+(!p.enabled?' selected':'')+'>停用</option></select></div>'
-  +'<button class="btn" onclick="submitEditProvider(\\''+esc(id)+'\\')">保存</button>');};
-window.submitEditProvider=function(id){api('PUT','/admin/api/providers/'+id,{name:document.getElementById('m-name').value,base_url:document.getElementById('m-url').value,enabled:document.getElementById('m-enabled').value==='1'}).then(function(){closeModal();render_providers(document.getElementById('view'));toast('✅ 已更新');});};
+  +'<div class="form-row"><div style="flex:1"><label>启用</label><select id="m-enabled"><option value="1"'+(p.enabled?' selected':'')+'>启用</option><option value="0"'+(!p.enabled?' selected':'')+'>停用</option></select></div><div style="flex:1"></div></div>'
+  +'<div style="margin-bottom:6px"><label style="font-size:12px;color:var(--muted)">已绑定 Keys（点击「移除」，保存后删除）</label><div id="m-keys" style="margin-top:4px">'+kb+'</div></div>'
+  +'<div class="form-row"><div style="flex:1"><label>追加新 Key（留空则不添加）</label><input id="m-key" type="password" placeholder="sk-..."></div></div>'
+  +'<div class="modal-actions"><button class="btn" onclick="submitEditProvider(\\''+esc(id)+'\\')">保存</button></div>');};
+window.submitEditProvider=function(id){api('PUT','/admin/api/providers/'+id,{name:document.getElementById('m-name').value,base_url:document.getElementById('m-url').value,enabled:document.getElementById('m-enabled').value==='1',key:document.getElementById('m-key').value.trim(),remove_keys:window._delKeys||[]}).then(function(){window._delKeys=[];closeModal();render_providers(document.getElementById('view'));toast('✅ 已更新');});};
+window.markDelKey=function(btn,kid){if(btn.disabled)return;btn.disabled=true;btn.textContent='✓ 待删除';btn.style.opacity=.55;(window._delKeys=window._delKeys||[]).push(kid);};
 window.deleteProvider=function(id){if(!confirm('确认删除？'))return;api('DELETE','/admin/api/providers/'+id).then(function(){render_providers(document.getElementById('view'));toast('🗑️ 已删除');});};
 window.toggleProvider=function(id){var p=state.providers.find(function(x){return x.id===id;});if(!p)return;api('PUT','/admin/api/providers/'+id,{enabled:!p.enabled}).then(function(){render_providers(document.getElementById('view'));toast(p.enabled?'✅ 已停用':'✅ 已启用');}).catch(function(e){toast('切换失败：'+(e&&e.error||e));});};
 
@@ -1191,7 +1270,10 @@ function render_route_table(){
       +'<td>'+((r.fallback||[]).map(esc).join(' → ')||'<span style="color:var(--muted)">-</span>')+'</td>'
       +'<td>'+(r.priority||0)+'</td>'
       +'<td style="font-size:12px;color:var(--muted)">'+(mm?esc(mm):'-')+'</td>'
-      +'<td><button class="btn ghost" onclick="editRoute(\\''+esc(r.id)+'\\')">编辑</button> <button class="btn danger" onclick="deleteRoute(\\''+esc(r.id)+'\\')">删除</button></td></tr>';
+      +'<td><div class="op-wrap"><button class="btn ghost" onclick="toggleOp(this)">⚙️ 操作 ▾</button><div class="op-drop">'
+      +'<button onclick="editRoute(\\''+esc(r.id)+'\\')">✏️ 编辑</button>'
+      +'<button class="danger" onclick="deleteRoute(\\''+esc(r.id)+'\\')">🗑️ 删除</button>'
+      +'</div></div></td></tr>';
   }).join('');
 }
 window.openRoute=function(){setModal('<h3>添加路由规则</h3>'
@@ -1199,41 +1281,22 @@ window.openRoute=function(){setModal('<h3>添加路由规则</h3>'
   +'<div class="form-row"><div style="flex:1"><label>命中供应商 ID（逗号分隔，有序）</label><input id="r-prov" placeholder="openai,anthropic"></div><div style="flex:1"><label>兜底供应商 ID</label><input id="r-fb" placeholder="openrouter"></div></div>'
   +'<div class="form-row"><div style="flex:1"><label>优先级（大者优先）</label><input id="r-pri" type="number" value="0"></div><div style="flex:1"><label>模型映射（可选：agent模型=上游模型，逗号分隔）</label><input id="r-map" placeholder="gpt-4o=deepseek-chat, claude-3.5-sonnet=hunyuan-turbo"></div></div>'
   +'<p style="font-size:11px;color:var(--muted);margin-top:4px">模型映射让 agent 用 A 的模型名调用 B 的模型：请求模型名命中映射时，转发前改写为上游模型名；留空=原样透传。</p>'
-  +'<button class="btn" onclick="submitRoute()">保存</button>');};
+  +'<div class="modal-actions"><button class="btn" onclick="submitRoute()">保存</button></div>');};
 window.submitRoute=function(){api('POST','/admin/api/routes',{name:document.getElementById('r-name').value,pattern:document.getElementById('r-pattern').value,providers:document.getElementById('r-prov').value.split(',').map(function(s){return s.trim();}).filter(Boolean),fallback:document.getElementById('r-fb').value.split(',').map(function(s){return s.trim();}).filter(Boolean),priority:parseInt(document.getElementById('r-pri').value)||0,model_map:parseModelMap(document.getElementById('r-map').value)}).then(function(){closeModal();render_routes(document.getElementById('view'));toast('✅ 已添加');});};
 window.editRoute=function(id){var r=state.routes.find(function(x){return x.id===id;});if(!r)return;setModal('<h3>编辑路由规则</h3>'
   +'<div class="form-row"><div style="flex:1"><label>名称</label><input id="r-name" value="'+esc(r.name||'')+'"></div><div style="flex:1"><label>匹配模式</label><input id="r-pattern" value="'+esc(r.pattern)+'"></div></div>'
   +'<div class="form-row"><div style="flex:1"><label>命中供应商</label><input id="r-prov" value="'+esc((r.providers||[]).join(','))+'"></div><div style="flex:1"><label>兜底</label><input id="r-fb" value="'+esc((r.fallback||[]).join(','))+'"></div></div>'
   +'<div class="form-row"><div style="flex:1"><label>优先级</label><input id="r-pri" type="number" value="'+esc(r.priority||0)+'"></div><div style="flex:1"><label>模型映射（agent模型=上游模型）</label><input id="r-map" value="'+esc(modelMapToText(r.model_map))+'"></div></div>'
-  +'<button class="btn" onclick="submitEditRoute(\\''+esc(id)+'\\')">保存</button>');};
+  +'<div class="modal-actions"><button class="btn" onclick="submitEditRoute(\\''+esc(id)+'\\')">保存</button></div>');};
 window.submitEditRoute=function(id){api('PUT','/admin/api/routes/'+id,{name:document.getElementById('r-name').value,pattern:document.getElementById('r-pattern').value,providers:document.getElementById('r-prov').value.split(',').map(function(s){return s.trim();}).filter(Boolean),fallback:document.getElementById('r-fb').value.split(',').map(function(s){return s.trim();}).filter(Boolean),priority:parseInt(document.getElementById('r-pri').value)||0,model_map:parseModelMap(document.getElementById('r-map').value)}).then(function(){closeModal();render_routes(document.getElementById('view'));toast('✅ 已更新');});};
 window.deleteRoute=function(id){if(!confirm('确认删除？'))return;api('DELETE','/admin/api/routes/'+id).then(function(){render_routes(document.getElementById('view'));toast('🗑️ 已删除');});};
 // 模型映射：文本 "a=b, c=d" ⇄ 对象 {a:'b',c:'d'}
 function parseModelMap(txt){var o={};String(txt||'').split(/[,，\\n]/).forEach(function(p){var i=p.indexOf('=');if(i>0){var k=p.slice(0,i).trim(),v=p.slice(i+1).trim();if(k&&v)o[k]=v;}});return o;}
 function modelMapToText(mm){var out=[];for(var k in (mm||{})){if(Object.prototype.hasOwnProperty.call(mm,k))out.push(k+'='+mm[k]);}return out.join(', ');}
 
-// ---- Keys ----
-function render_keys(main){
-  main.innerHTML='<div class="topbar"><h2>🔑 API Keys</h2><button class="btn" onclick="openKey()">＋ 添加 Key</button></div>'
-    + '<div class="panel"><div class="table-scroll"><table><thead><tr><th>名称</th><th>供应商</th><th>掩码</th><th>操作</th></tr></thead><tbody id="key-tbody"></tbody></table></div></div>';
-  api('GET','/admin/api/keys').then(function(d){
-    state.keys=d.data||d;
-    render_key_table();
-  }).catch(function(e){toast(e&&e.error||e);});
-}
-function render_key_table(){
-  var tb=document.getElementById('key-tbody');
-  tb.innerHTML=state.keys.map(function(k){
-    return '<tr><td>'+esc(k.name||'(未命名)')+'</td><td><code>'+esc(k.provider_id)+'</code></td><td><code>'+esc(k.masked||'****')+'</code></td>'
-      +'<td><button class="btn danger" onclick="deleteKey(\\''+esc(k.id)+'\\')">删除</button></td></tr>';
-  }).join('')||'<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:20px">暂无 Key，添加后供应商方可转发</td></tr>';
-}
-window.openKey=function(){var opts=state.providers.map(function(p){return '<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>';}).join('');setModal('<h3>添加 API Key</h3>'
-  +'<div class="form-row"><div style="flex:1"><label>名称</label><input id="k-name"></div><div style="flex:1"><label>所属供应商</label><select id="k-prov">'+opts+'</select></div></div>'
-  +'<div class="form-row"><div style="flex:1"><label>真实 Key（AES-GCM 加密存储，仅你可见）</label><input id="k-secret" type="password" placeholder="sk-..."></div></div>'
-  +'<button class="btn" onclick="submitKey()">保存</button>');};
-window.submitKey=function(){api('POST','/admin/api/keys',{name:document.getElementById('k-name').value,provider_id:document.getElementById('k-prov').value,secret:document.getElementById('k-secret').value}).then(function(){closeModal();render_keys(document.getElementById('view'));toast('✅ 已添加');}).catch(function(e){var msg=(e&&e.error)||'保存失败';toast('❌ '+msg);setModal('<h3>保存失败</h3><p style="color:var(--danger)">'+esc(msg)+'</p><p style="font-size:12px;color:var(--muted);margin-top:8px">提示：Key 采用 AES-GCM 加密存储，加密密钥与环境变量 ENCRYPT_KEY 自动关联；如刚才配置过 ENCRYPT_KEY，请重新部署后再试。</p>');});};
-window.deleteKey=function(id){if(!confirm('确认删除？删除后该 Key 无法再用于转发'))return;api('DELETE','/admin/api/keys/'+id).then(function(){render_keys(document.getElementById('view'));toast('🗑️ 已删除');});};
+// ---- Keys 已并入「供应商」页（添加/编辑供应商表单直接管理 Key）----
+// 原独立 Keys 页面（render_keys/openKey/submitKey/deleteKey）自 v3.5.0 移除；
+// 后端 /admin/api/keys* 接口保留，供兼容与 /v1 探测逻辑使用。
 
 // ---- 使用指南 ----
 function render_guide(main){
@@ -1244,7 +1307,7 @@ function render_guide(main){
 function render_guide_mini(){
   var mount=document.getElementById('guide-mount');
   if(!mount) return;
-  mount.innerHTML='<div class="panel" style="border-color:var(--accent)"><h3>👋 欢迎使用 iRouter v3.4.0（Cloudflare D1 版）</h3><div id="guide-mini-body"></div><button class="btn ghost" onclick="document.getElementById(\\'guide-mount\\').innerHTML=\\'\\'">关闭</button></div>';
+  mount.innerHTML='<div class="panel" style="border-color:var(--accent)"><h3>👋 欢迎使用 iRouter v3.5.0（Cloudflare D1 版）</h3><div id="guide-mini-body"></div><button class="btn ghost" onclick="document.getElementById(\\'guide-mount\\').innerHTML=\\'\\'">关闭</button></div>';
   render_guide_content(document.getElementById('guide-mini-body'), true);
   if(!localStorage.getItem('irouter_guide_dismissed')){
     setTimeout(function(){var b=document.getElementById('guide-mini-body');if(b) render_guide_content(b,true);},50);
@@ -1254,16 +1317,16 @@ function render_guide_content(el, mini){
   if(!el) return;
   var steps = [
     {t:'部署完成',d:'访问「健康检查」<code>/health</code> 应返回 <code>{"ok":true,"storage":"d1"}</code>；后台各页面能正常显示数据即说明 D1 绑定正常。'},
-    {t:'添加供应商',d:'「供应商」页 → ＋ 添加，填写名称、标识、Base URL、协议（openai/anthropic/gemini）。'},
-    {t:'配置 Key',d:'「API Keys」页 → 添加真实 Key（AES-GCM 加密存储，仅你可见）。'},
+    {t:'添加供应商',d:'「供应商」页 → ＋ 添加，填写名称、标识、Base URL、协议（openai/anthropic/gemini），可同时填写 API Key。'},
+    {t:'配置 Key',d:'供应商「编辑」弹窗中可追加 Key / 移除 Key（AES-GCM 加密存储，仅你可见）。'},
     {t:'设置路由规则',d:'「路由规则」页 → ＋ 添加，pattern 支持 <code>*</code> 通配，命中后按供应商列表顺序尝试 + 兜底。'},
-    {t:'验证转发',d:'复制下方「调用信息」卡的 curl 示例，或直接 POST <code>/v1/chat/completions</code>，Header 带 <code>Authorization: Bearer &lt;API_TOKEN&gt;</code>。'},
+    {t:'验证转发',d:'复制「系统设置」页的 curl 示例，或直接 POST <code>/v1/chat/completions</code>，Header 带 <code>Authorization: Bearer &lt;API_TOKEN&gt;</code>。'},
     {t:'监控',d:'回到「首页」看模型排行 / 供应商健康度 / 最近请求。'},
   ];
   el.innerHTML='<ol style="padding-left:20px">'+
     steps.map(function(s,idx){return '<li style="margin-bottom:12px"><b>'+s.t+'</b><br><span style="color:var(--nav);font-size:13px">'+s.d+'</span></li>';}).join('')+
     '</ol>'+
-    (mini?'':'<p style="margin-top:16px;color:var(--muted);font-size:12px">💡 总览页的「调用信息」可随时查看 Base URL 与 Token，并支持修改（与登录密码相互独立）。</p>');
+    (mini?'':'<p style="margin-top:16px;color:var(--muted);font-size:12px">💡 「系统设置」页可随时查看网关 Base URL 与调用 Token，支持修改与自动生成（与登录密码相互独立）；该页还提供「系统初始化」一键重置后台凭据。</p>');
   if(!mini) localStorage.setItem('irouter_guide_dismissed','1');
 }
 
@@ -1283,11 +1346,11 @@ window.doLogin=function(){api('POST','/admin/api/login',{password:document.getEl
 
 // 重新初始化入口：输入当前密码校验通过后，切换到初始化表单（带 current_password 提交）
 window.openReinit=function(){
-  setModal('<h3>🔁 重新初始化</h3>'
-    +'<p style="font-size:12px;color:var(--muted);margin:6px 0 14px">将重置管理员密码与会话密钥。为安全起见，请先输入<b>当前管理员密码</b>验证身份。</p>'
+  setModal('<h3>🔁 系统初始化</h3>'
+    +'<p style="font-size:12px;color:var(--muted);margin:6px 0 14px">将重置管理员密码与会话密钥（凭据存储于 D1 数据库 meta，不占环境变量）。为安全起见，请先输入<b>当前管理员密码</b>验证身份。</p>'
     +'<label style="font-size:12px;color:var(--muted)">当前管理员密码</label>'
     +'<input id="reinit-cur" type="password" style="width:100%;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:10px;border-radius:10px;margin:8px 0 4px" placeholder="当前密码" onkeydown="if(event.key===\\'Enter\\')doReinitStep1()">'
-    +'<div style="margin-top:12px;text-align:right"><button class="btn" onclick="doReinitStep1()">下一步</button></div>');
+    +'<div class="modal-actions"><button class="btn" onclick="doReinitStep1()">下一步</button></div>');
 };
 window.doReinitStep1=function(){
   var cur=document.getElementById('reinit-cur').value;
@@ -1326,7 +1389,8 @@ window.doSetup=function(reinit){
 };
 
 // ---- 模态框 ----
-function setModal(html){document.getElementById('modal-box').innerHTML=html+'<div style="margin-top:16px;text-align:right"><button class="btn ghost" onclick="closeModal()">取消</button></div>';document.getElementById('modal').className='modal show';}
+// setModal：弹窗内容底部按钮自动与「取消」拼接为单个胶囊分节按钮（.modal-actions）；内容里无 .modal-actions 时回退旧样式
+function setModal(html){var box=document.getElementById('modal-box');box.innerHTML=html;var cancel='<button class="btn ghost" onclick="closeModal()">取消</button>';var actions=box.querySelector('.modal-actions');if(actions){actions.insertAdjacentHTML('beforeend',cancel);}else{box.insertAdjacentHTML('beforeend','<div style="margin-top:16px;text-align:right">'+cancel+'</div>');}document.getElementById('modal').className='modal show';}
 window.closeModal=function(){document.getElementById('modal').className='modal';};
 
 // ============ 导航 + 自动刷新 ============
