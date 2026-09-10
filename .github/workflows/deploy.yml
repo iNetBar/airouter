@@ -147,21 +147,25 @@ jobs:
           command: pages project create irouter --production-branch main
         continue-on-error: true
 
-      # ⑦b 可选：Pages secrets 自动注入（仓库里配了对应 GitHub Secrets 才生效；未配置自动跳过，可继续部署）
-      #     ⚠️ 必须在 Deploy Pages 之前执行！Pages 的 secret/变量是随 deployment 构建时快照的，
-      #     若在部署之后再 put，本次部署不会包含新 secret，必须再等下一次部署才生效（"设置后不生效"的经典坑）。
-      - name: Set Pages secrets (optional)
+      # ⑦b Pages secrets 管理（必须在 Deploy Pages 之前执行！Pages 的 secret/变量是随 deployment 构建时快照的）
+      #     - DEFAULT_ADMIN_PASS / SESSION_SECRET 已弃用：后台凭据改存 D1 meta，「修改密码 / 重新初始化」功能需要
+      #       删除这两个 env 才能生效（env 优先于 meta）。此处幂等删除，线上没有则跳过。
+      #     - PROXY_KEY / ENCRYPT_KEY 为可选注入（仓库里配了对应 GitHub Secrets 才生效）
+      - name: Manage Pages secrets (optional)
         env:
-          # 裸 wrangler 命令必须显式提供认证，否则 put 会因无法认证而静默失败（|| true 吞掉错误）
+          # 裸 wrangler 命令必须显式提供认证，否则会因无法认证而静默失败（|| true 吞掉错误）
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          DAP: ${{ secrets.DEFAULT_ADMIN_PASS }}
-          SS: ${{ secrets.SESSION_SECRET }}
           PK: ${{ secrets.PROXY_KEY }}
           EK: ${{ secrets.ENCRYPT_KEY }}
+          DAP: ${{ secrets.DEFAULT_ADMIN_PASS }}
+          SS: ${{ secrets.SESSION_SECRET }}
         run: |
-          [ -n "$DAP" ] && printf '%s' "$DAP" | npx wrangler pages secret put DEFAULT_ADMIN_PASS --project-name irouter || true
-          [ -n "$SS" ] && printf '%s' "$SS" | npx wrangler pages secret put SESSION_SECRET --project-name irouter || true
+          # 删除弃用的凭据 env（幂等：不存在时 wrangler 报错，|| true 容错）
+          for s in DEFAULT_ADMIN_PASS SESSION_SECRET; do
+            printf 'y\n' | npx wrangler pages secret delete "$s" --project-name irouter || true
+          done
+          # 可选注入（可随时在 GitHub Secrets 增删后重新部署生效）
           [ -n "$PK" ] && printf '%s' "$PK" | npx wrangler pages secret put PROXY_KEY --project-name irouter || true
           [ -n "$EK" ] && printf '%s' "$EK" | npx wrangler pages secret put ENCRYPT_KEY --project-name irouter || true
 
@@ -182,5 +186,6 @@ jobs:
           echo "   管理后台：https://irouter.pages.dev/admin"
           echo "   健康检查：https://irouter.pages.dev/health"
           echo ""
-          echo "⚠️ 首次务必到 Cloudflare 控制台设置密码："
-          echo "   Pages → irouter → Settings → Variables and Secrets → SESSION_SECRET / DEFAULT_ADMIN_PASS"
+          echo "⚠️ 后台凭据使用数据库存储（不再用环境变量）"
+          echo "   - 登录密码：未初始化时登录页可见「快速初始化」；已初始化可在「调用信息」页点「🔑 修改登录密码」"
+          echo "   - 登录页底部「🔁 重新初始化（需当前密码）」可重置全部凭据"
