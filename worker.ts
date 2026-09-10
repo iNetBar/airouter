@@ -1,4 +1,4 @@
-// worker.ts — iRouter v3.6.0 (Cloudflare Workers + D1)
+// worker.ts — iRouter v3.7.0 (Cloudflare Workers + D1)
 // 相比 v3.0 (KV 版) 的变化：存储层从 Deno KV / Workers KV 全部迁移到 D1 (db.ts)
 // Hono 路由定义、API 路径、前端 dashboard.html 完全不变（路由层/前端零改动）
 
@@ -188,7 +188,7 @@ export default {
         ctx.waitUntil(builtinsInit);
 
         // ---------- 健康检查 ----------
-        app.get('/health', (c) => c.json({ ok: true, version: '3.6.0', storage: 'd1' }));
+        app.get('/health', (c) => c.json({ ok: true, version: '3.7.0', storage: 'd1' }));
 
         // =================================================================
         // 代理转发（流式透传，CPU < 5ms，不 buffer 完整响应）
@@ -226,9 +226,60 @@ export default {
             if (!body || !body.model) return err(400, 'model required', 'invalid_request_error');
 
             const start = Date.now();
+            const model = String(body.model);
+            // 直连模式：?direct_provider=<id> 时跳过路由匹配，直接使用该供应商已保存的 Key 调用上游
+            // （诊断场景：透传上游真实错误，便于判断供应商/Key 是否可用）
+            const directProvider = new URL(c.req.url).searchParams.get('direct_provider');
+            if (directProvider) {
+                const providers = await db.getProviders(env.DB);
+                const p = providers.find(x => x.id === directProvider);
+                if (!p) return err(404, `直连供应商「${directProvider}」不存在：请在「供应商」页确认 ID`, 'provider_not_found');
+                if (p.protocol !== 'openai') return err(400, `供应商「${p.name}」协议为 ${p.protocol}，暂不支持直连（仅 openai 协议）`, 'unsupported_protocol');
+                const keys = await db.getKeys(env.DB, p.id);
+                if (!keys.length) return err(502, `供应商「${p.name}」未配置 Key，无法直连：请编辑供应商并添加 Key`, 'provider_unavailable');
+                let lastErr: any = null, lastStatus = 502;
+                for (const k of keys) {
+                    let apiKey: string;
+                    try { apiKey = await decrypt(k.secret, await getEncryptKey(env)); }
+                    catch (e) { lastErr = new Error(`Key ${k.id} 解密失败（请确认 ENCRYPT_KEY 与保存该 Key 时一致）`); continue; }
+                    const upstream = p.base_url + (p.base_url.endsWith('/') ? '' : '/') + 'chat/completions';
+                    try {
+                        const upstreamReq = new Request(upstream, {
+                            method: 'POST',
+                            headers: { 'content-type': 'application/json', 'authorization': 'Bearer ' + apiKey, ...p.headers },
+                            body: JSON.stringify(body),
+                            // CF 特有：带 body 的 fetch 必须 duplex: 'half'，否则抛异常
+                            duplex: 'half' as any,
+                        });
+                        const res = await fetch(upstreamReq);
+                        const latency = Date.now() - start;
+                        if (!res.ok) {
+                            // 直连：尽量透传上游真实错误（优先取 error.message / error.type）
+                            const errText = await res.text().catch(() => '');
+                            let brief = errText.slice(0, 200) || res.statusText;
+                            try { const j = JSON.parse(errText); const em = j && j.error; if (em) brief = String(em.message || em.type || brief).slice(0, 200); } catch { /* 非 JSON 原样保留 */ }
+                            lastErr = new Error(`[${p.id}] HTTP ${res.status} ${brief.slice(0, 300)}`);
+                            lastStatus = res.status;
+                            db.logRing.push({ model, provider: p.id, ok: false, latency_ms: latency, status: res.status });
+                            db.logRing.flush(env.DB);
+                            continue;
+                        }
+                        ctx.waitUntil(db.touchKey(env.DB, k.id));
+                        db.logRing.push({ model, provider: p.id, ok: true, latency_ms: latency, status: res.status });
+                        db.logRing.flush(env.DB);
+                        // 流式：直接透传 ReadableStream，零 buffer
+                        if (body.stream && res.body) return new Response(res.body, { status: res.status, headers: res.headers });
+                        const text = await res.text();
+                        return new Response(text, { status: res.status, headers: res.headers });
+                    } catch (e) { lastErr = e; lastStatus = 502; continue; }
+                }
+                db.logRing.push({ model, provider: 'none', ok: false, latency_ms: Date.now() - start, status: lastStatus });
+                db.logRing.flush(env.DB);
+                return err(lastStatus, `直连失败：${lastErr?.message || '无可用 Key'}`, 'upstream_error');
+            }
+
             // 路由匹配：找命中的供应商（pattern 支持 * 通配，其余字符按字面匹配）
             const routes = await db.getRoutes(env.DB);
-            const model = String(body.model);
             const matched = routes
                 .filter(r => {
                     if (!r.enabled) return false;
@@ -445,7 +496,7 @@ export default {
             });
 
             return c.json({
-                version: '3.6.0',
+                version: '3.7.0',
                 generatedAt: Date.now(),
                 storage: { mode: 'd1', writable: true, warning: null },
                 counts: { providers: providers.length, routes: routes.length, keys: keys.length },
@@ -962,7 +1013,7 @@ const ADMIN_HTML = `<!DOCTYPE html>
 </div>
 <div class="layout">
   <aside class="sidebar">
-    <div class="brand"><div class="brand-text"><h1>iRouter<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button></h1><small>智能路由网关 v3.6.0</small></div></div>
+    <div class="brand"><div class="brand-text"><h1>iRouter<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button></h1><small>智能路由网关 v3.7.0</small></div></div>
     <nav class="nav">
       <a href="#dashboard" class="active" data-view="dashboard">🏠 首页</a>
       <a href="#providers" data-view="providers">⚙️ 供应商</a>
@@ -1155,6 +1206,7 @@ function render_chat(main){
     + '<label>模型（该供应商支持的模型；可手动输入）</label><div style="display:flex;gap:8px"><select id="ch-model" style="flex:1" onchange="chatOnModel()"><option value="">— 选择模型 —</option></select><input id="ch-model-custom" style="flex:1;display:none" placeholder="手动输入模型名，如 gpt-4o-mini"></div>'
     + '</div></div>'
     + '<div class="form-row"><div style="flex:1"><label>系统提示词（可选）</label><input id="ch-sys" placeholder="例如：你是一个乐于助人的助手"></div></div>'
+    + '<div class="form-row" style="padding:8px 0 2px"><label class="chk" style="font-weight:600"><input type="checkbox" id="ch-direct" onchange="chatOnDirect()"> 🔗 直连供应商（跳过路由规则，直接用所选供应商的 Key 调用上游 API）</label></div>'
     + '<div id="ch-hint" style="font-size:12px;color:var(--muted)">选择供应商与模型后发送消息：请求走 <code>/v1/chat/completions</code>（调用 Token 鉴权 + 路由规则匹配 + 上游供应商转发），可验证整条链路。多轮上下文自动保留，可随时「清空对话」。</div>'
     + '</div>'
     + '<div class="panel"><div class="chat-msgs" id="chat-msgs"><div class="chat-msg ai">💬 选择一个模型，输入消息开始在线聊天测试；多轮上下文自动保留，可随时「清空对话」。</div></div>'
@@ -1198,6 +1250,13 @@ function chatOnModel(){
   var c=document.getElementById('ch-model-custom');
   if(v==='__custom__'){c.style.display='';c.focus();}else{c.style.display='none';}
 }
+function chatOnDirect(){
+  var on=document.getElementById('ch-direct').checked;
+  var hint=document.getElementById('ch-hint');
+  hint.innerHTML=on
+    ? '🔗 <b>直连模式</b>：请求将带 <code>?direct_provider=…</code> 跳过路由规则匹配，直接使用所选供应商已保存的 Key 调用其上游 <code>/chat/completions</code>；上游真实错误会透传回来，便于诊断该供应商与 Key 的可用性。'
+    : '选择供应商与模型后发送消息：请求走 <code>/v1/chat/completions</code>（调用 Token 鉴权 + 路由规则匹配 + 上游供应商转发），可验证整条链路。多轮上下文自动保留，可随时「清空对话」。';
+}
 function chatCurrentModel(){
   var v=document.getElementById('ch-model').value;
   return v==='__custom__'?document.getElementById('ch-model-custom').value.trim():v;
@@ -1212,6 +1271,9 @@ function chatAddMsg(role,html,extra){
   return d;
 }
 function chatSend(){
+  var direct=document.getElementById('ch-direct').checked;
+  var pid=document.getElementById('ch-prov').value;
+  if(direct&&!pid){toast('🔗 直连模式请先选择供应商');return;}
   var model=chatCurrentModel();
   if(!model){toast('请先选择供应商与模型，或手动输入模型名');return;}
   var text=document.getElementById('chat-text').value.trim();
@@ -1225,7 +1287,9 @@ function chatSend(){
   var tip=chatAddMsg('ai','请求中', 'loading');
   var t0=Date.now();
   var btn=document.getElementById('chat-send');btn.disabled=true;btn.textContent='⏳ 发送中…';
-  fetch('/v1/chat/completions',{
+  var url='/v1/chat/completions'+(direct&&pid?('?direct_provider='+encodeURIComponent(pid)):'');
+  var whoName=direct?'🔗 直连':'🤖 网关';
+  fetch(url,{
     method:'POST',
     headers:{'content-type':'application/json','authorization':'Bearer '+chatState.token},
     body:JSON.stringify({model:model,messages:chatState.msgs,stream:false}),
@@ -1240,12 +1304,12 @@ function chatSend(){
       var msg=(em&&typeof em==='object'&&em.message)||(typeof em==='string'?em:(res.j&&res.j.message))||('HTTP '+res.status);
       var hint='';
       if(res.status===401) hint='（调用 Token 无效或未配置：请到「系统设置」确认）';
-      else if(res.status===404) hint='（未匹配到转发路由：请到「路由规则」添加 pattern 匹配该模型的规则，如 *）';
-      else if(res.status===502) hint='（上游转发失败：请检查供应商 Key 与可用性）';
+      else if(res.status===404) hint=direct?'（直连失败：该供应商不存在，或请求被网关拒绝）':'（未匹配到转发路由：请到「路由规则」添加 pattern 匹配该模型的规则，如 *）';
+      else if(res.status===502) hint=direct?'（直连失败：请按上方错误检查该供应商 Key、base URL 与 Key 可用性）':'（上游转发失败：请检查供应商 Key 与可用性）';
       chatState.msgs.pop();
       tip.className='chat-msg ai err-bubble';
-      tip.innerHTML='<div class="who">🤖 网关</div>'+esc(msg)+hint;
-      meta.textContent='HTTP '+res.status+' · '+ms+'ms';
+      tip.innerHTML='<div class="who">'+whoName+'</div>'+esc(msg)+hint;
+      meta.textContent=(direct?'🔗 直连 · ':'')+'HTTP '+res.status+' · '+ms+'ms';
       return;
     }
     var choice=res.j&&res.j.choices&&res.j.choices[0];
@@ -1254,13 +1318,13 @@ function chatSend(){
     var reasoning=(typeof m.reasoning_content==='string'&&m.reasoning_content.trim())?'<div class="who">🧠 思考（reasoning_content）</div>'+esc(m.reasoning_content).replace(/\\n/g,'<br>')+'<br>':'';
     var usage=(res.j&&res.j.usage)?(' · '+(res.j.usage.prompt_tokens||0)+'→'+(res.j.usage.completion_tokens||0)+' tokens'):'';
     tip.className='chat-msg ai';
-    tip.innerHTML='<div class="who">🤖 '+esc(model)+usage+'</div>'+reasoning+esc(content).replace(/\\n/g,'<br>');
+    tip.innerHTML='<div class="who">'+whoName+' '+esc(model)+usage+'</div>'+reasoning+esc(content).replace(/\\n/g,'<br>');
     chatState.msgs.push({role:'assistant',content:content});
-    meta.textContent='✅ 回复完成 · '+ms+'ms · HTTP 200';
+    meta.textContent=(direct?'🔗 直连 · ':'')+'✅ 回复完成 · '+ms+'ms · HTTP 200';
   }).catch(function(e){
     chatState.msgs.pop();
     tip.className='chat-msg ai err-bubble';
-    tip.innerHTML='<div class="who">🤖 网关</div>请求失败：'+esc((e&&e.message)||String(e));
+    tip.innerHTML='<div class="who">'+whoName+'</div>请求失败：'+esc((e&&e.message)||String(e));
   }).then(function(){
     btn.disabled=false;btn.textContent='🚀 发送';
   });
@@ -1299,7 +1363,7 @@ function render_conn(s){
            + '  -H "Content-Type: application/json" \\\\\\n'
            + '  -d \\'{ "model": "gpt-4o-mini", "messages": [{"role":"user","content":"hello"}] }\\'';
   document.getElementById('conn').innerHTML = ''
-    + row_html('🏷️ 项目名', esc(s.projectName||'iRouter')+' <span class="badge ok">v3.6.0 · D1</span>')
+    + row_html('🏷️ 项目名', esc(s.projectName||'iRouter')+' <span class="badge ok">v3.7.0 · D1</span>')
     + row_html('🌐 网关 Base URL', '<code id="conn-url">'+esc(baseUrl)+'</code> <span class="copy" onclick="copyText(\\'conn-url\\')">📋 复制</span>')
     + row_html('🔑 调用 Token', '<code id="conn-token">'+esc(token)+'</code> <span class="copy" onclick="copyText(\\'conn-token\\')">📋 复制</span>')
     + '<div style="margin-top:14px"><label style="font-size:12px;color:var(--muted)">📦 快速调用示例（curl）</label><pre id="conn-curl">'+esc(curl)+'</pre><span class="copy" onclick="copyText(\\'conn-curl\\')">📋 复制</span></div>';
@@ -1471,7 +1535,7 @@ function render_guide(main){
 function render_guide_mini(){
   var mount=document.getElementById('guide-mount');
   if(!mount) return;
-  mount.innerHTML='<div class="panel" style="border-color:var(--accent)"><h3>👋 欢迎使用 iRouter v3.6.0（Cloudflare D1 版）</h3><div id="guide-mini-body"></div><button class="btn ghost" onclick="document.getElementById(\\'guide-mount\\').innerHTML=\\'\\'">关闭</button></div>';
+  mount.innerHTML='<div class="panel" style="border-color:var(--accent)"><h3>👋 欢迎使用 iRouter v3.7.0（Cloudflare D1 版）</h3><div id="guide-mini-body"></div><button class="btn ghost" onclick="document.getElementById(\\'guide-mount\\').innerHTML=\\'\\'">关闭</button></div>';
   render_guide_content(document.getElementById('guide-mini-body'), true);
   if(!localStorage.getItem('irouter_guide_dismissed')){
     setTimeout(function(){var b=document.getElementById('guide-mini-body');if(b) render_guide_content(b,true);},50);
