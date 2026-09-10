@@ -1,4 +1,4 @@
--- iRouter v3.3.0 — Cloudflare D1 schema
+-- iRouter v3.4.0 — Cloudflare D1 schema
 -- 部署：wrangler d1 execute irouter --remote --file=./schema.sql
 -- 本地：wrangler d1 execute irouter --local  --file=./schema.sql
 -- 注意：不要在 D1 上执行 PRAGMA journal_mode / foreign_keys ——
@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS meta (
     v TEXT NOT NULL DEFAULT '{}'
 );
 INSERT OR IGNORE INTO meta(k, v) VALUES
-    ('version',  '"3.3.0"'),
+    ('version',  '"3.4.0"'),
     ('config',   '{}'),
     ('settings', '{"projectName":"iRouter","baseUrl":"","apiToken":"","tokenMasked":""}'),
     ('stats',    '{"totalRequests":0,"successCount":0,"successRate":0,"avgLatency":0}');

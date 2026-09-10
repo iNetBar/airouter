@@ -1,4 +1,4 @@
-// worker.ts — iRouter v3.3.0 (Cloudflare Workers + D1)
+// worker.ts — iRouter v3.4.0 (Cloudflare Workers + D1)
 // 相比 v3.0 (KV 版) 的变化：存储层从 Deno KV / Workers KV 全部迁移到 D1 (db.ts)
 // Hono 路由定义、API 路径、前端 dashboard.html 完全不变（路由层/前端零改动）
 
@@ -114,7 +114,7 @@ async function probeProviderModels(env: Env, p: db.Provider, force = false): Pro
         const keys = await db.getKeys(env.DB, p.id);
         for (const k of keys) {
             let apiKey: string;
-            try { apiKey = await decrypt(k.secret, env.ENCRYPT_KEY); } catch { continue; }
+            try { apiKey = await decrypt(k.secret, await getEncryptKey(env)); } catch { continue; }
             const url = p.base_url + (p.base_url.endsWith('/') ? '' : '/') + 'models';
             const res = await fetch(url, { headers: { authorization: 'Bearer ' + apiKey, ...p.headers } });
             if (!res.ok) continue;
@@ -188,7 +188,7 @@ export default {
         ctx.waitUntil(builtinsInit);
 
         // ---------- 健康检查 ----------
-        app.get('/health', (c) => c.json({ ok: true, version: '3.3.0', storage: 'd1' }));
+        app.get('/health', (c) => c.json({ ok: true, version: '3.4.0', storage: 'd1' }));
 
         // =================================================================
         // 代理转发（流式透传，CPU < 5ms，不 buffer 完整响应）
@@ -269,7 +269,7 @@ export default {
                 // 解密 secret（AES-GCM）；解密失败给出明确错误并尝试下一个 Key/供应商
                 let apiKey: string;
                 try {
-                    apiKey = await decrypt(k.secret, env.ENCRYPT_KEY);
+                    apiKey = await decrypt(k.secret, await getEncryptKey(env));
                 } catch (e) {
                     lastErr = new Error(`key ${k.id} 解密失败（请确认 ENCRYPT_KEY 与保存该 Key 时一致）`);
                     continue;
@@ -329,15 +329,41 @@ export default {
             return c.json({ required: !pass || !secret });
         });
         app.post('/admin/api/bootstrap', async (c) => {
-            const { password = '', session_secret = '' } = await c.req.json().catch(() => ({})) as any;
+            const { password = '', session_secret = '', current_password = '' } = await c.req.json().catch(() => ({})) as any;
             if (String(password).length < 6) return err(400, '管理员密码至少 6 位');
             if (String(session_secret).length < 12) return err(400, '会话密钥至少 12 位随机串');
             const cur = await bootstrapMeta(env);
-            if (cur.pass || cur.secret) return err(409, '已初始化过，如需重置请先删除 meta 中 admin_pass_hash/session_secret');
+            if (cur.pass || cur.secret) {
+                // 已初始化 → 重新初始化模式：必须提供当前密码校验，防止未授权重置
+                if (env.DEFAULT_ADMIN_PASS || env.SESSION_SECRET) {
+                    // env 优先：写入 meta 不会生效，直接引导改环境变量
+                    return err(409, '当前凭据来自环境变量（DEFAULT_ADMIN_PASS / SESSION_SECRET），后台重置不会生效。请直接在 Cloudflare 控制台修改环境变量并重新部署；如需改用数据库凭据，请先删除这两个环境变量');
+                }
+                if (!cur.pass) return err(409, '已初始化过，如需重置请先删除 meta 中 admin_pass_hash/session_secret');
+                if (typeof current_password !== 'string' || !current_password) return err(400, '已初始化过：请提供当前管理员密码（current_password）以重新初始化');
+                const curOk = await hmacSha256(cur.secret, current_password) === cur.pass;   // meta 来源：HMAC 比对
+                if (!curOk) return err(401, '当前密码验证失败');
+            }
             // 存 HMAC(password, session_secret)，即使库被读到也无法直接还原密码
             const hash = await hmacSha256(String(session_secret), String(password));
             await db.metaSet(env.DB, 'admin_pass_hash', hash);
             await db.metaSet(env.DB, 'session_secret', String(session_secret));
+            return c.json({ ok: true, reinit: !!(cur.pass || cur.secret) });
+        });
+        // 修改登录密码（需已登录；旧密码校验通过后更新 meta 中的 admin_pass_hash）
+        app.post('/admin/api/password', async (c) => {
+            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
+            const { old_password = '', new_password = '' } = await c.req.json().catch(() => ({})) as any;
+            if (String(new_password).length < 6) return err(400, '新密码至少 6 位');
+            if (typeof old_password !== 'string' || !old_password) return err(400, '请提供当前密码');
+            const { pass, secret } = await bootstrapMeta(env);
+            if (!pass || !secret) return err(500, '未配置管理员密码（使用环境变量时请直接修改 DEFAULT_ADMIN_PASS）');
+            // 密码来自环境变量时不允许通过后台修改（env 优先，改了 meta 也不生效），给出明确引导
+            if (env.DEFAULT_ADMIN_PASS) return err(409, '当前密码来自环境变量 DEFAULT_ADMIN_PASS，请直接在 Cloudflare 控制台修改环境变量并重新部署');
+            const verified = await hmacSha256(secret, old_password) === pass;
+            if (!verified) return err(401, '当前密码错误');
+            const hash = await hmacSha256(secret, String(new_password));
+            await db.metaSet(env.DB, 'admin_pass_hash', hash);
             return c.json({ ok: true });
         });
         app.post('/admin/api/login', async (c) => {
@@ -419,7 +445,7 @@ export default {
             });
 
             return c.json({
-                version: '3.3.0',
+                version: '3.4.0',
                 generatedAt: Date.now(),
                 storage: { mode: 'd1', writable: true, warning: null },
                 counts: { providers: providers.length, routes: routes.length, keys: keys.length },
@@ -529,7 +555,7 @@ export default {
             if (keys.length === 0) return c.json({ ok: false, message: '该供应商还没有 Key，请先添加 Key 再测试' });
             let apiKey: string;
             try {
-                apiKey = await decrypt(keys[0].secret, env.ENCRYPT_KEY);
+                apiKey = await decrypt(keys[0].secret, await getEncryptKey(env));
             } catch {
                 return c.json({ ok: false, message: 'Key 解密失败：可能与保存时的 ENCRYPT_KEY 不一致，请重新保存 Key' });
             }
@@ -607,16 +633,15 @@ export default {
         app.get('/admin/api/keys', async (c) => {
             if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
             const keys = await db.getKeys(env.DB);
-            return c.json({ ok: true, data: keys.map(k => ({ ...k, secret: '' })), encryptReady: !!env.ENCRYPT_KEY });   // 列表不返回密文，附带加密能力状态
+            return c.json({ ok: true, data: keys.map(k => ({ ...k, secret: '' })), encryptReady: true });   // 列表不返回密文；加密密钥自动就绪（env 或 meta 懒生成）
         });
         app.post('/admin/api/keys', async (c) => {
             if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
-            if (!env.ENCRYPT_KEY) {
-                return err(500, 'ENCRYPT_KEY 未配置：无法加密存储 API Key。请先在 Cloudflare 控制台设置 ENCRYPT_KEY（任意长随机串）后再添加');
-            }
+            const ek = await getEncryptKey(env);
+            if (!ek) return err(500, '加密密钥暂不可用：请设置 ENCRYPT_KEY 环境变量后重试');   // 双保险：meta 读写异常时兜底提示
             const body = await c.req.json().catch(() => ({})) as any;
             if (!body.secret) return err(400, 'secret required');
-            const encrypted = await encrypt(String(body.secret), env.ENCRYPT_KEY);
+            const encrypted = await encrypt(String(body.secret), ek);
             const k: db.KeyRow = {
                 id: 'k_' + Date.now(),
                 name: body.name || '',
@@ -666,10 +691,24 @@ export default {
 
 // =====================================================================
 // 加密工具（AES-GCM，secret 落库前加密）
-//   ENCRYPT_KEY 必填：未配置时拒绝新增 Key（不允许用公开默认密钥兜底）
-//   decrypt 兼容早期用默认密钥加密的存量数据
+//   密钥优先级：env.ENCRYPT_KEY > meta 中 encrypt_key（首次使用时自动生成并持久化）
+//   → 未配置环境变量也能开箱即用；decrypt 兼容早期用默认密钥加密的存量数据
 // =====================================================================
 const LEGACY_ENCRYPT_KEY = 'default-encrypt-key-change-me';
+
+// 当前加密密钥：env 优先，否则取 meta，不存在则随机生成并存 meta（懒初始化）
+async function getEncryptKey(env: Env): Promise<string> {
+    if (env.ENCRYPT_KEY) return env.ENCRYPT_KEY;
+    try {
+        const cur = await db.metaGet<string>(env.DB, 'encrypt_key', '');
+        if (cur) return cur;
+        const fresh = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
+        await db.metaSet(env.DB, 'encrypt_key', fresh);
+        return fresh;
+    } catch {
+        return '';
+    }
+}
 
 async function getKeyMaterial(key: string): Promise<CryptoKey> {
     return crypto.subtle.importKey(
@@ -841,7 +880,7 @@ const ADMIN_HTML = `<!DOCTYPE html>
 </div>
 <div class="layout">
   <aside class="sidebar">
-    <div class="brand"><div class="brand-text"><h1>iRouter<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button></h1><small>智能路由网关 v3.3.0</small></div></div>
+    <div class="brand"><div class="brand-text"><h1>iRouter<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button></h1><small>智能路由网关 v3.4.0</small></div></div>
     <nav class="nav">
       <a href="#dashboard" class="active" data-view="dashboard">🏠 首页</a>
       <a href="#providers" data-view="providers">⚙️ 供应商</a>
@@ -1025,13 +1064,15 @@ function render_recent(list){
 function render_settings(main){
   main.innerHTML = '<div class="topbar"><h2>⚡ 调用信息</h2></div>'
     + '<div class="conn-card" id="conn"></div>'
-    + '<div class="panel" style="margin-top:24px"><h3>📝 修改配置</h3><div id="settings-form"></div></div>';
+    + '<div class="panel" style="margin-top:24px"><h3>📝 修改配置</h3><div id="settings-form"></div></div>'
+    + '<div class="panel" style="margin-top:24px"><h3>🔑 修改登录密码</h3><div id="pwd-form"></div></div>';
   api('GET','/admin/api/settings').then(function(d){
     var s = d.data || d;
     state.settings = s;
     render_conn(s);
     render_settings_form(s);
   }).catch(function(e){ toast('加载失败：'+(e&&e.error||e)); });
+  render_pwd_form();
 }
 
 function gwBase(raw){
@@ -1046,7 +1087,7 @@ function render_conn(s){
            + '  -H "Content-Type: application/json" \\\\\\n'
            + '  -d \\'{ "model": "gpt-4o-mini", "messages": [{"role":"user","content":"hello"}] }\\'';
   document.getElementById('conn').innerHTML = ''
-    + row_html('🏷️ 项目名', esc(s.projectName||'iRouter')+' <span class="badge ok">v3.3.0 · D1</span>')
+    + row_html('🏷️ 项目名', esc(s.projectName||'iRouter')+' <span class="badge ok">v3.4.0 · D1</span>')
     + row_html('🌐 网关 Base URL', '<code id="conn-url">'+esc(baseUrl)+'</code> <span class="copy" onclick="copyText(\\'conn-url\\')">📋 复制</span>')
     + row_html('🔑 调用 Token', '<code id="conn-token">'+esc(token)+'</code> <span class="copy" onclick="copyText(\\'conn-token\\')">📋 复制</span>')
     + '<div style="margin-top:14px"><label style="font-size:12px;color:var(--muted)">📦 快速调用示例（curl）</label><pre id="conn-curl">'+esc(curl)+'</pre><span class="copy" onclick="copyText(\\'conn-curl\\')">📋 复制</span></div>';
@@ -1074,6 +1115,26 @@ window.saveSettings = function(){
     document.getElementById('f-token').value='';
     fetchDashboard && fetchDashboard();   // 静默刷新回填
   }).catch(function(e){ toast('保存失败：'+(e&&e.error||e)); });
+};
+
+// 修改登录密码（校验当前密码；仅 meta 来源凭据可改，env 来源提示改环境变量）
+function render_pwd_form(){
+  document.getElementById('pwd-form').innerHTML = ''
+    + '<div style="font-size:12px;color:var(--muted);margin-bottom:10px">修改后台登录密码（需输入当前密码验证；若密码来自环境变量 DEFAULT_ADMIN_PASS 请直接改环境变量）</div>'
+    + '<div class="form-row"><div style="flex:1"><label>当前密码</label><input id="pw-old" type="password" placeholder="当前登录密码" autocomplete="current-password"></div>'
+    + '<div style="flex:1"><label>新密码（至少 6 位）</label><input id="pw-new" type="password" placeholder="新密码" autocomplete="new-password"></div></div>'
+    + '<div class="form-row"><div style="flex:1"><label>确认新密码</label><input id="pw-new2" type="password" placeholder="再次输入新密码" autocomplete="new-password"></div><div style="flex:1"></div></div>'
+    + '<button class="btn" onclick="changePassword()">🔑 修改密码</button>';
+}
+window.changePassword=function(){
+  var oldP=document.getElementById('pw-old').value, newP=document.getElementById('pw-new').value, newP2=document.getElementById('pw-new2').value;
+  if(!oldP){toast('❌ 请输入当前密码');return;}
+  if(newP.length<6){toast('❌ 新密码至少 6 位');return;}
+  if(newP!==newP2){toast('❌ 两次输入的新密码不一致');return;}
+  api('POST','/admin/api/password',{old_password:oldP,new_password:newP}).then(function(){
+    toast('✅ 密码已修改');
+    document.getElementById('pw-old').value=document.getElementById('pw-new').value=document.getElementById('pw-new2').value='';
+  }).catch(function(e){ toast('❌ '+((e&&e.error)||e||'修改失败')); });
 };
 
 window.copyText = function(id){var el=document.getElementById(id);var txt=el.textContent||el.innerText;navigator.clipboard.writeText(txt).then(function(){toast('📋 已复制');},function(){toast('复制失败，请手动选择');});};
@@ -1154,15 +1215,9 @@ function modelMapToText(mm){var out=[];for(var k in (mm||{})){if(Object.prototyp
 // ---- Keys ----
 function render_keys(main){
   main.innerHTML='<div class="topbar"><h2>🔑 API Keys</h2><button class="btn" onclick="openKey()">＋ 添加 Key</button></div>'
-    + '<div id="enc-warn" class="hidden"></div>'
     + '<div class="panel"><div class="table-scroll"><table><thead><tr><th>名称</th><th>供应商</th><th>掩码</th><th>操作</th></tr></thead><tbody id="key-tbody"></tbody></table></div></div>';
   api('GET','/admin/api/keys').then(function(d){
     state.keys=d.data||d;
-    var w=document.getElementById('enc-warn');
-    if(w && d.encryptReady===false){
-      w.className='';
-      w.innerHTML='<div style="background:var(--warn-bg);color:var(--warn-fg);border:1px solid var(--border);border-radius:12px;padding:10px 14px;margin-bottom:14px;font-size:13px">⚠️ <b>ENCRYPT_KEY 未配置</b>：当前无法加密保存 API Key。请先在 Cloudflare 控制台给本项目设置 <code>ENCRYPT_KEY</code>（任意长随机串）并重新部署后，再添加 Key。</div>';
-    }
     render_key_table();
   }).catch(function(e){toast(e&&e.error||e);});
 }
@@ -1177,7 +1232,7 @@ window.openKey=function(){var opts=state.providers.map(function(p){return '<opti
   +'<div class="form-row"><div style="flex:1"><label>名称</label><input id="k-name"></div><div style="flex:1"><label>所属供应商</label><select id="k-prov">'+opts+'</select></div></div>'
   +'<div class="form-row"><div style="flex:1"><label>真实 Key（AES-GCM 加密存储，仅你可见）</label><input id="k-secret" type="password" placeholder="sk-..."></div></div>'
   +'<button class="btn" onclick="submitKey()">保存</button>');};
-window.submitKey=function(){api('POST','/admin/api/keys',{name:document.getElementById('k-name').value,provider_id:document.getElementById('k-prov').value,secret:document.getElementById('k-secret').value}).then(function(){closeModal();render_keys(document.getElementById('view'));toast('✅ 已添加');}).catch(function(e){var msg=(e&&e.error)||'保存失败';toast('❌ '+msg);setModal('<h3>保存失败</h3><p style="color:var(--danger)">'+esc(msg)+'</p><p style="font-size:12px;color:var(--muted);margin-top:8px">提示：添加 API Key 需要先配置 ENCRYPT_KEY（Cloudflare 控制台 → 本项目 → 设置 → 环境变量），配置后重新部署再添加。</p>');});};
+window.submitKey=function(){api('POST','/admin/api/keys',{name:document.getElementById('k-name').value,provider_id:document.getElementById('k-prov').value,secret:document.getElementById('k-secret').value}).then(function(){closeModal();render_keys(document.getElementById('view'));toast('✅ 已添加');}).catch(function(e){var msg=(e&&e.error)||'保存失败';toast('❌ '+msg);setModal('<h3>保存失败</h3><p style="color:var(--danger)">'+esc(msg)+'</p><p style="font-size:12px;color:var(--muted);margin-top:8px">提示：Key 采用 AES-GCM 加密存储，加密密钥与环境变量 ENCRYPT_KEY 自动关联；如刚才配置过 ENCRYPT_KEY，请重新部署后再试。</p>');});};
 window.deleteKey=function(id){if(!confirm('确认删除？删除后该 Key 无法再用于转发'))return;api('DELETE','/admin/api/keys/'+id).then(function(){render_keys(document.getElementById('view'));toast('🗑️ 已删除');});};
 
 // ---- 使用指南 ----
@@ -1189,7 +1244,7 @@ function render_guide(main){
 function render_guide_mini(){
   var mount=document.getElementById('guide-mount');
   if(!mount) return;
-  mount.innerHTML='<div class="panel" style="border-color:var(--accent)"><h3>👋 欢迎使用 iRouter v3.3.0（Cloudflare D1 版）</h3><div id="guide-mini-body"></div><button class="btn ghost" onclick="document.getElementById(\\'guide-mount\\').innerHTML=\\'\\'">关闭</button></div>';
+  mount.innerHTML='<div class="panel" style="border-color:var(--accent)"><h3>👋 欢迎使用 iRouter v3.4.0（Cloudflare D1 版）</h3><div id="guide-mini-body"></div><button class="btn ghost" onclick="document.getElementById(\\'guide-mount\\').innerHTML=\\'\\'">关闭</button></div>';
   render_guide_content(document.getElementById('guide-mini-body'), true);
   if(!localStorage.getItem('irouter_guide_dismissed')){
     setTimeout(function(){var b=document.getElementById('guide-mini-body');if(b) render_guide_content(b,true);},50);
@@ -1221,30 +1276,53 @@ function render_login(){
     +'<label style="font-size:12px;color:var(--muted)">管理员密码</label>'
     +'<input id="login-pass" type="password" style="width:100%;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:10px;border-radius:10px;margin:8px 0 16px" placeholder="请输入密码" onkeydown="if(event.key===\\'Enter\\')doLogin()">'
     +'<button class="btn" style="width:100%;padding:11px" onclick="doLogin()">登录</button>'
-    +'<p style="font-size:11px;color:var(--muted);margin-top:16px;text-align:center">凭据来自环境变量（DEFAULT_ADMIN_PASS / SESSION_SECRET）或首次初始化</p></div>';
+    +'<p style="font-size:11px;color:var(--muted);margin-top:16px;text-align:center">凭据来自环境变量（DEFAULT_ADMIN_PASS / SESSION_SECRET）或首次初始化</p>'
+    +'<p style="font-size:12px;text-align:center;margin-top:10px"><a href="javascript:void(0)" onclick="openReinit()" style="color:var(--accent)">🔁 重新初始化（需当前密码）</a></p></div>';
 }
 window.doLogin=function(){api('POST','/admin/api/login',{password:document.getElementById('login-pass').value}).then(function(){toast('✅ 登录成功');render();startAutoRefresh();}).catch(function(e){toast('❌ '+((e&&e.error)||e||'登录失败'));});};
 
+// 重新初始化入口：输入当前密码校验通过后，切换到初始化表单（带 current_password 提交）
+window.openReinit=function(){
+  setModal('<h3>🔁 重新初始化</h3>'
+    +'<p style="font-size:12px;color:var(--muted);margin:6px 0 14px">将重置管理员密码与会话密钥。为安全起见，请先输入<b>当前管理员密码</b>验证身份。</p>'
+    +'<label style="font-size:12px;color:var(--muted)">当前管理员密码</label>'
+    +'<input id="reinit-cur" type="password" style="width:100%;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:10px;border-radius:10px;margin:8px 0 4px" placeholder="当前密码" onkeydown="if(event.key===\\'Enter\\')doReinitStep1()">'
+    +'<div style="margin-top:12px;text-align:right"><button class="btn" onclick="doReinitStep1()">下一步</button></div>');
+};
+window.doReinitStep1=function(){
+  var cur=document.getElementById('reinit-cur').value;
+  if(!cur){toast('❌ 请输入当前密码');return;}
+  api('POST','/admin/api/login',{password:cur}).then(function(){
+    window._reinitCurPass=cur;
+    closeModal();
+    render_setup(true);
+  }).catch(function(e){toast('❌ 当前密码验证失败：'+((e&&e.error)||e||'密码错误'));});
+};
+
 // 未初始化（缺管理密码/会话密钥）时渲染快速初始化表单 —— 开箱即用，无需先配置环境变量
-function render_setup(){
+// reinit=true：重新初始化模式（已初始化，提交时带 current_password，后端校验后覆盖）
+function render_setup(reinit){
   var ab = document.getElementById('appbar');
   if(ab) ab.style.display='none';
+  var t = reinit ? { t:'🔄 重新初始化', d:'已配置过凭据，将用新密码/新密钥覆盖。提交前需校验当前密码。' } : { t:'🚀 iRouter 快速初始化', d:'首次部署请在此设置后台凭据，立即开始使用（已配置环境变量则可直接登录）' };
   document.getElementById('view').innerHTML='<div class="login-box">'
-    +'<h2 style="text-align:center;margin-bottom:6px">🚀 iRouter 快速初始化</h2>'
-    +'<p style="text-align:center;font-size:12px;color:var(--muted);margin-bottom:20px">首次部署请在此设置后台凭据，立即开始使用（已配置环境变量则可直接登录）</p>'
+    +'<h2 style="text-align:center;margin-bottom:6px">'+t.t+'</h2>'
+    +'<p style="text-align:center;font-size:12px;color:var(--muted);margin-bottom:20px">'+t.d+'</p>'
     +'<label style="font-size:12px;color:var(--muted)">管理员密码（至少 6 位）</label>'
     +'<input id="s-pass" type="password" style="width:100%;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:10px;border-radius:10px;margin:8px 0 14px" placeholder="设置登录密码">'
     +'<label style="font-size:12px;color:var(--muted)">会话密钥 Session Secret（至少 12 位随机串）</label>'
     +'<div style="display:flex;gap:8px;margin:8px 0 20px"><input id="s-secret" type="text" style="flex:1;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:10px;border-radius:10px" placeholder="如 8J3k9xQ2LmNp"><button class="btn ghost" onclick="genSecret()">🎲 随机生成</button></div>'
-    +'<button class="btn" style="width:100%;padding:11px" onclick="doSetup()">完成初始化，去登录</button>'
+    +'<button class="btn" style="width:100%;padding:11px" onclick="doSetup('+(reinit?'true':'false')+')">'+(reinit?'确认重新初始化':'完成初始化，去登录')+'</button>'
     +'<p style="font-size:11px;color:var(--muted);margin-top:14px;text-align:center">凭据仅加密存储于 D1 数据库 meta 中，不占环境变量</p></div>';
 }
 window.genSecret=function(){var c='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';var s='';for(var i=0;i<24;i++)s+=c[Math.floor(Math.random()*c.length)];document.getElementById('s-secret').value=s;};
-window.doSetup=function(){
+window.doSetup=function(reinit){
   var p=document.getElementById('s-pass').value, s=document.getElementById('s-secret').value.trim();
   if(p.length<6){toast('❌ 密码至少 6 位');return;}
   if(s.length<12){toast('❌ 会话密钥至少 12 位');return;}
-  api('POST','/admin/api/bootstrap',{password:p,session_secret:s}).then(function(){toast('✅ 初始化完成，请登录');render_login();}).catch(function(e){toast('❌ '+((e&&e.error)||e||'初始化失败'));});
+  var body={password:p,session_secret:s};
+  if(reinit) body.current_password=window._reinitCurPass||'';
+  api('POST','/admin/api/bootstrap',body).then(function(){toast(reinit?'✅ 已重新初始化，请用新密码登录':'✅ 初始化完成，请登录');window._reinitCurPass='';render_login();}).catch(function(e){toast('❌ '+((e&&e.error)||e||'初始化失败'));});
 };
 
 // ---- 模态框 ----
