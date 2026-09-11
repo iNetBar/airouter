@@ -942,6 +942,14 @@ const ADMIN_HTML = `<!DOCTYPE html>
   .modal-actions .btn:first-child{border-radius:999px 0 0 999px!important}
   .modal-actions .btn:last-child{border-radius:0 999px 999px 0!important}
   .modal-actions .btn.ghost{margin-left:-1px!important;border-left:none}
+
+  .toggle{position:relative;display:inline-block;width:46px;height:26px;flex-shrink:0;cursor:pointer}
+  .toggle input{opacity:0;width:0;height:0}
+  .toggle .slider{position:absolute;cursor:pointer;inset:0;background:var(--border);transition:.25s;border-radius:999px}
+  .toggle .slider:before{content:"";position:absolute;height:20px;width:20px;left:3px;bottom:3px;background:#fff;transition:.25s;border-radius:50%}
+  .toggle input:checked+.slider{background:var(--accent)}
+  .toggle input:checked+.slider:before{transform:translateX(20px)}
+  .toggle input:focus-visible+.slider{box-shadow:0 0 0 3px var(--active-bg)}
   /* 在线聊天：对话气泡与输入区 */
   .chat-msgs{display:flex;flex-direction:column;gap:10px;max-height:52vh;overflow-y:auto;padding:2px 0}
   .chat-msg{max-width:78%;padding:10px 14px;border-radius:14px;font-size:13px;white-space:pre-wrap;word-break:break-word;line-height:1.7;border:1px solid var(--border)}
@@ -1205,8 +1213,8 @@ function render_chat(main){
     + '</div><div style="flex:1">'
     + '<label>模型（该供应商支持的模型；可手动输入）</label><div style="display:flex;gap:8px"><select id="ch-model" style="flex:1" onchange="chatOnModel()"><option value="">— 选择模型 —</option></select><input id="ch-model-custom" style="flex:1;display:none" placeholder="手动输入模型名，如 gpt-4o-mini"></div>'
     + '</div></div>'
-    + '<div class="form-row"><div style="flex:1"><label>系统提示词（可选）</label><input id="ch-sys" placeholder="例如：你是一个乐于助人的助手"></div></div>'
-    + '<div class="form-row" style="padding:8px 0 2px"><label class="chk" style="font-weight:600"><input type="checkbox" id="ch-direct" onchange="chatOnDirect()"> 🔗 直连供应商（跳过路由规则，直接用所选供应商的 Key 调用上游 API）</label></div>'
+    + '<div class="form-row" style="align-items:center;flex-wrap:nowrap"><div style="flex:1;min-width:0;max-width:calc(50% - 5px)"><label>系统提示词（可选）</label><input id="ch-sys" style="min-width:0;width:160px" placeholder="例如：你是一个乐于助人的助手"></div>'
+    + '<div style="display:flex;align-items:center;gap:10px;white-space:nowrap;flex-shrink:0;margin-top:28px"><label class="toggle" title="直连供应商：跳过路由规则，直接用所选供应商的 Key 调用上游 API"><input type="checkbox" id="ch-direct" onchange="chatOnDirect()"><span class="slider"></span></label><span id="ch-mode-label" style="font-size:13px;font-weight:600;color:var(--muted)">路由模式</span></div></div>'
     + '<div id="ch-hint" style="font-size:12px;color:var(--muted)">选择供应商与模型后发送消息：请求走 <code>/v1/chat/completions</code>（调用 Token 鉴权 + 路由规则匹配 + 上游供应商转发），可验证整条链路。多轮上下文自动保留，可随时「清空对话」。</div>'
     + '</div>'
     + '<div class="panel"><div class="chat-msgs" id="chat-msgs"><div class="chat-msg ai">💬 选择一个模型，输入消息开始在线聊天测试；多轮上下文自动保留，可随时「清空对话」。</div></div>'
@@ -1252,6 +1260,11 @@ function chatOnModel(){
 }
 function chatOnDirect(){
   var on=document.getElementById('ch-direct').checked;
+  var label=document.getElementById('ch-mode-label');
+  if(label){
+    label.textContent=on?'🔗 直连模式':'路由模式';
+    label.style.color=on?'var(--accent)':'var(--muted)';
+  }
   var hint=document.getElementById('ch-hint');
   hint.innerHTML=on
     ? '🔗 <b>直连模式</b>：请求将带 <code>?direct_provider=…</code> 跳过路由规则匹配，直接使用所选供应商已保存的 Key 调用其上游 <code>/chat/completions</code>；上游真实错误会透传回来，便于诊断该供应商与 Key 的可用性。'
