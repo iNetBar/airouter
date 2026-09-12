@@ -66,9 +66,19 @@ jobs:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: |
-          echo "::warning::CF_API_TOKEN  => $( [ -n "$CF_API_TOKEN" ] && echo SET || echo EMPTY )"
-          echo "::warning::CF_ACCOUNT_ID => $( [ -n "$CF_ACCOUNT_ID" ] && echo SET || echo EMPTY )"
+          echo "::warning::CF_API_TOKEN  => $( [ -n "$CF_API_TOKEN" ] && echo "SET (len=${#CF_API_TOKEN})" || echo EMPTY )"
+          echo "::warning::CF_ACCOUNT_ID => $( [ -n "$CF_ACCOUNT_ID" ] && echo "SET (len=${#CF_ACCOUNT_ID})" || echo EMPTY )"
           npx wrangler whoami 2>&1 | sed -E 's/\x1B\[[0-9;]*[mK]//g' | sed 's/^/::warning::whoami => /' || echo "::warning::whoami 执行失败"
+          echo "::warning::---- direct API checks (no secret values printed) ----"
+          VRFY=$(curl -s -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" -H "Authorization: Bearer $CF_API_TOKEN")
+          echo "$VRFY" | sed -E 's/\x1B\[[0-9;]*[mK]//g' | head -c 1200 | sed 's/^/::warning::verify => /'
+          echo ""
+          D1=$(curl -s -o /dev/null -w "http:%{http_code}" "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database" -H "Authorization: Bearer $CF_API_TOKEN")
+          echo "::warning::d1/database direct http_code => $D1"
+          if [ "${D1#http:}" = "200" ]; then
+            curl -s "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database" -H "Authorization: Bearer $CF_API_TOKEN" | head -c 600 | sed 's/^/::warning::d1-body => /'
+            echo ""
+          fi
 
       # ⑤ 建库：d1 create（库已存在会报错，continue-on-error 容错继续）
       #    注意：wrangler-action 的 command 不经 shell 解析，绝不能写 `|| true` 这类
@@ -88,9 +98,9 @@ jobs:
       - name: Inject D1 database id
         run: |
           set +e
-          RAW=$(npx --yes wrangler@4 d1 list --json 2>&1); RC=$?
+          RAW=$(npx wrangler d1 list --json 2>&1); RC=$?
           CLEAN=$(printf '%s' "$RAW" | sed -E 's/\x1B\[[0-9;]*[mK]//g' | tr '\n' ' ' | cut -c1-3000)
-          echo "::error::d1 list (wrangler@4) rc=$RC => $CLEAN"
+          echo "::error::d1 list rc=$RC => $CLEAN"
           if [ $RC -ne 0 ]; then exit $RC; fi
           set -e
           DB_ID=$(printf '%s' "$RAW" | sed -E 's/\x1B\[[0-9;]*[mK]//g' | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{s=s.trim();let a;try{a=JSON.parse(s)}catch(e){console.error('JSON parse failed. raw='+s.slice(0,800));process.exit(1)}if(!Array.isArray(a))a=(a&&(a.result||a.data))||[];const r=a.find(x=>x&&x.name==='irouter-db');if(!r){console.error('D1 irouter-db not found. raw='+s.slice(0,800));process.exit(1)}process.stdout.write(r.uuid||r.id)})")
