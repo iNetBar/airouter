@@ -68,12 +68,12 @@ jobs:
         run: |
           echo "::warning::CF_API_TOKEN  => $( [ -n "$CF_API_TOKEN" ] && echo "SET (len=${#CF_API_TOKEN})" || echo EMPTY )"
           echo "::warning::CF_ACCOUNT_ID => $( [ -n "$CF_ACCOUNT_ID" ] && echo "SET (len=${#CF_ACCOUNT_ID})" || echo EMPTY )"
-          WHO=$(npx wrangler whoami 2>&1 | sed -E 's/\x1B\[[0-9;]*[mK]//g' | grep -E 'email|account|ID|@' | head -4 | tr '\n' ' ')
-          echo "::warning::whoami-keylines => ${WHO:-<no key lines>}"
-          VRFY=$(curl -s -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json")
-          echo "::warning::verify-raw => $(printf '%s' "$VRFY" | tr '\n' ' ' | cut -c1-500)"
-          D1=$(curl -s -o /dev/null -w "%{http_code}" "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database" -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json")
-          echo "::warning::d1/database http_code => $D1"
+          TOKS=$(printf '%s' "$CF_API_TOKEN" | sed -E 's/./x/g')
+          echo "::warning::token-pattern => ${TOKS:0:2}...${TOKS: -2} all=[a-zA-Z0-9_-]=$(printf '%s' "$CF_API_TOKEN" | grep -cE '^[A-Za-z0-9_-]+$')"
+          VRFY=$(curl -sk --max-time 20 -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json")
+          echo "::warning::verify-raw(curl-k) => $(printf '%s' "$VRFY" | tr '\n' ' ' | cut -c1-600)"
+          D1=$(curl -sk --max-time 20 -o /dev/null -w "%{http_code}" "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database" -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json")
+          echo "::warning::d1/database http_code(curl-k) => $D1"
 
       # ⑤ 建库：d1 create（库已存在会报错，continue-on-error 容错继续）
       #    注意：wrangler-action 的 command 不经 shell 解析，绝不能写 `|| true` 这类
