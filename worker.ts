@@ -452,7 +452,7 @@ export default {
                 status: 200,
                 headers: {
                     'content-type': 'application/json',
-                    'set-cookie': `irouter_sid=${sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`,
+                    'set-cookie': `irouter_sid=${sid}; HttpOnly; SameSite=Strict; Secure; Path=/; Max-Age=86400`,
                 },
             });
         });
@@ -504,7 +504,7 @@ export default {
                 recent,
                 modelRanking,
                 providerHealth,
-                providers,           // 前端 render_dashboard 用到
+                providers: providers.map(p => ({ id: p.id, name: p.name, enabled: p.enabled })),   // 白名单化：前端总览仅用 enabled 统计
                 settings,            // 总览页调用信息卡
             });
         });
@@ -562,8 +562,11 @@ export default {
             if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
             const providers = await db.getProviders(env.DB);
             const keys = await db.getKeys(env.DB);   // 全部 Key（secret 密文剥离，仅回传摘要）
+            // 白名单化返回：剥离 headers（可能含自定义密钥类请求头）与 providers.keys 列（历史明文残留），前端仅依赖以下字段
             return c.json(providers.map(p => ({
-                ...p,
+                id: p.id, name: p.name, builtin: p.builtin, enabled: p.enabled,
+                base_url: p.base_url, protocol: p.protocol,
+                created_at: p.created_at, updated_at: p.updated_at,
                 keysBrief: keys.filter(k => k.provider_id === p.id)
                     .map(k => ({ id: k.id, name: k.name, masked: k.masked, hint: k.hint, last_used: k.last_used })),
             })));
@@ -579,7 +582,7 @@ export default {
                 base_url: body.base_url || '',
                 protocol: body.protocol || 'openai',
                 headers: body.headers || {},
-                keys: body.keys || [],
+                keys: [],                    // 忽略 body.keys：密钥只走独立 keys 表（AES-GCM 密文），杜绝明文落 providers 表
                 created_at: Math.floor(Date.now() / 1000),
                 updated_at: Math.floor(Date.now() / 1000),
             };
@@ -612,6 +615,7 @@ export default {
                 base_url: body.base_url ?? cur.base_url,
                 protocol: body.protocol ?? cur.protocol,
                 headers: body.headers ?? cur.headers,
+                keys: [],                    // 清空历史残留的 providers.keys 明文列（密钥统一走独立 keys 表）
                 updated_at: Math.floor(Date.now() / 1000),
             };
             await db.saveProvider(env.DB, next);
