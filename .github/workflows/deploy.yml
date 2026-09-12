@@ -87,10 +87,12 @@ jobs:
       #    占位符当 UUID 请求 API → Invalid uuid [code: 7400] / Pages 8000022
       - name: Inject D1 database id
         run: |
-          set -o pipefail
+          set +e
           RAW=$(npx wrangler d1 list --json 2>&1); RC=$?
           CLEAN=$(printf '%s' "$RAW" | sed -E 's/\x1B\[[0-9;]*[mK]//g' | tr '\n' ' ' | cut -c1-3000)
           echo "::error::d1 list rc=$RC => $CLEAN"
+          if [ $RC -ne 0 ]; then exit $RC; fi
+          set -e
           DB_ID=$(printf '%s' "$RAW" | sed -E 's/\x1B\[[0-9;]*[mK]//g' | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{s=s.trim();let a;try{a=JSON.parse(s)}catch(e){console.error('JSON parse failed. raw='+s.slice(0,800));process.exit(1)}if(!Array.isArray(a))a=(a&&(a.result||a.data))||[];const r=a.find(x=>x&&x.name==='irouter-db');if(!r){console.error('D1 irouter-db not found. raw='+s.slice(0,800));process.exit(1)}process.stdout.write(r.uuid||r.id)})")
           echo "D1 database_id = $DB_ID"
           sed -i "s|<DATABASE_ID>|$DB_ID|" wrangler.toml
