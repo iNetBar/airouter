@@ -60,7 +60,7 @@ jobs:
         run: npm run build
 
       # ④b 凭据诊断（只判断存在性，不打印值；错误状态写 annotation 以便外部可见）
-      #     若 EMPTY → Secrets 名字/位置配错或未填值；若 SET 但 whoami 失败 → Token 无效或权限不足
+      #     若 EMPTY → Secrets 名字/位置配错或未填值；若 SET 但 verify 失败 → Token 无效或权限不足
       - name: Diagnose CF credentials
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
@@ -68,12 +68,8 @@ jobs:
         run: |
           echo "::warning::CF_API_TOKEN  => $( [ -n "$CF_API_TOKEN" ] && echo "SET (len=${#CF_API_TOKEN})" || echo EMPTY )"
           echo "::warning::CF_ACCOUNT_ID => $( [ -n "$CF_ACCOUNT_ID" ] && echo "SET (len=${#CF_ACCOUNT_ID})" || echo EMPTY )"
-          TOKS=$(printf '%s' "$CF_API_TOKEN" | sed -E 's/./x/g')
-          echo "::warning::token-pattern => ${TOKS:0:2}...${TOKS: -2} all=[a-zA-Z0-9_-]=$(printf '%s' "$CF_API_TOKEN" | grep -cE '^[A-Za-z0-9_-]+$')"
           VRFY=$(curl -sk --max-time 20 -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json")
-          echo "::warning::verify-raw(curl-k) => $(printf '%s' "$VRFY" | tr '\n' ' ' | cut -c1-600)"
-          D1=$(curl -sk --max-time 20 -o /dev/null -w "%{http_code}" "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database" -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json")
-          echo "::warning::d1/database http_code(curl-k) => $D1"
+          echo "::warning::token-verify => $(printf '%s' "$VRFY" | grep -o '"success":[a-z]*' | head -1) $(printf '%s' "$VRFY" | grep -o '"code":[0-9]*' | head -2 | tr '\n' ' ')"
 
       # ⑤ 建库：d1 create（库已存在会报错，continue-on-error 容错继续）
       #    注意：wrangler-action 的 command 不经 shell 解析，绝不能写 `|| true` 这类
