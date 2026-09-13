@@ -805,7 +805,8 @@ export default {
         // ---------- 启动定时 flush（best-effort，Workers 空闲会被取消，定量 flush 兜底）----------
         db.logRing.startTimer(env.DB);
 
-        return app.fetch(request);
+        // 以当前请求的 env/ctx 调用 Hono（模块级 app 单例：c.env / c.executionCtx 由此注入）
+        return app.fetch(request, env, ctx);
     },
 };
 
