@@ -84,6 +84,28 @@ function timingSafeEqual(a: string, b: string): boolean {
     return diff === 0;
 }
 
+// 上游响应头透传白名单：只放行对 AI 客户端有意义的头（content-type 决定 JSON/SSE 解析，
+// x-request-id / openai-* / x-ratelimit-* 供排查与退避），set-cookie、CORS、鉴权、
+// 供应商内部头等一律丢弃，由本服务自持，避免上游头整体透传（安全审计低危项收口）
+const UPSTREAM_HEADER_WHITELIST = new Set([
+    'content-type',
+    'x-request-id',
+    'openai-version',
+    'openai-organization',
+    'openai-processing-ms',
+    'x-ratelimit-limit-requests',
+    'x-ratelimit-limit-tokens',
+    'x-ratelimit-remaining-requests',
+    'x-ratelimit-remaining-tokens',
+    'x-ratelimit-reset-requests',
+    'x-ratelimit-reset-tokens',
+]);
+function upstreamHeaders(h: Headers): Headers {
+    const out = new Headers();
+    h.forEach((v, k) => { if (UPSTREAM_HEADER_WHITELIST.has(k.toLowerCase())) out.set(k, v); });
+    return out;
+}
+
 // =====================================================================
 // /v1/models 模型目录：内置供应商 → 常见模型名（静态，开箱即用）
 // 自定义供应商走 runtime 探测（probeProviderModels，60s 缓存）
@@ -277,9 +299,9 @@ export default {
                         db.logRing.push({ model, provider: p.id, ok: true, latency_ms: latency, status: res.status });
                         db.logRing.flush(c.env.DB);
                         // 流式：直接透传 ReadableStream，零 buffer
-                        if (body.stream && res.body) return new Response(res.body, { status: res.status, headers: res.headers });
+                        if (body.stream && res.body) return new Response(res.body, { status: res.status, headers: upstreamHeaders(res.headers) });
                         const text = await res.text();
-                        return new Response(text, { status: res.status, headers: res.headers });
+                        return new Response(text, { status: res.status, headers: upstreamHeaders(res.headers) });
                     } catch (e) { lastErr = e; lastStatus = 502; continue; }
                 }
                 db.logRing.push({ model, provider: 'none', ok: false, latency_ms: Date.now() - start, status: lastStatus });
@@ -362,10 +384,10 @@ export default {
 
                     // 流式：直接透传 ReadableStream，零 buffer
                     if (body.stream && res.body) {
-                        return new Response(res.body, { status: res.status, headers: res.headers });
+                        return new Response(res.body, { status: res.status, headers: upstreamHeaders(res.headers) });
                     }
                     const text = await res.text();
-                    return new Response(text, { status: res.status, headers: res.headers });
+                    return new Response(text, { status: res.status, headers: upstreamHeaders(res.headers) });
                 } catch (e) {
                     lastErr = e;
                     continue;            // 尝试下一个 Key / 供应商（兜底）

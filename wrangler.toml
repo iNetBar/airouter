@@ -1,4 +1,5 @@
 # irouter v3.7.0 — Cloudflare Pages + D1 配置
+# wrangler 4.x + compatibility_date 2025-06-01（2025-09-13 升级）
 # 小白部署：id 已填入真实 D1 数据库，直接 git push 即可（见下方「首次 3 步」）
 #
 # ============================================================
@@ -22,7 +23,7 @@ name = "irouter"
 # Worker 入口为 dist/_worker.js（Pages Advanced 模式自动识别），故不再定义 main
 pages_build_output_dir = "dist"
 
-compatibility_date = "2025-01-01"
+compatibility_date = "2025-06-01"
 compatibility_flags = ["nodejs_compat"]
 
 # 免费额度优化：就近调度到数据库所在 region（Free 档也支持）
