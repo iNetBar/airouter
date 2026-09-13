@@ -1,11 +1,11 @@
-# irouter v3.4.0 — Cloudflare Pages + D1 配置
-# 小白部署：把 <DATABASE_ID> 换成真实值即可（见下方「首次 3 步」）
+# irouter v3.7.0 — Cloudflare Pages + D1 配置
+# 小白部署：id 已填入真实 D1 数据库，直接 git push 即可（见下方「首次 3 步」）
 #
 # ============================================================
 #  首次 3 步（只需做一次）：
 #    1. npm install -g wrangler && wrangler login
 #    2. wrangler d1 create irouter-db
-#       → 复制输出的 id（32 位十六进制），粘贴替换下面 <DATABASE_ID>
+#       → 复制输出的 id（32 位十六进制），粘贴替换下面 database_id
 #    3. git push（GitHub Actions 自动建表 + 部署到 Pages）
 # ============================================================
 #  敏感配置（不要在 wrangler.toml 里写明文！）：
@@ -34,7 +34,7 @@ mode = "smart"
 [[d1_databases]]
 binding = "DB"
 database_name = "irouter-db"
-database_id = "<DATABASE_ID>"
+database_id = "f49b9fcd-9def-46de-94ba-6a04372791bc"
 migrations_dir = "migrations"
 
 # 非敏感环境变量（明文即可）

@@ -32,7 +32,11 @@ export interface Stats {
 
 // ---------- 内存缓存（进程级，冷启动后首次读 D1，之后 60s 走内存）----------
 const CACHE_TTL = 60_000;
-const cache: { providers?: { data: Provider[]; at: number }; routes?: { data: Route[]; at: number } } = {};
+const cache: {
+    providers?: { data: Provider[]; at: number };
+    routes?: { data: Route[]; at: number };
+    keys?: { data: KeyRow[]; at: number };
+} = {}
 
 function expired(at?: number) { return !at || Date.now() - at > CACHE_TTL; }
 
@@ -86,6 +90,7 @@ export async function deleteProvider(db: D1Database, id: string): Promise<void> 
         db.prepare('DELETE FROM providers WHERE id = ?1 AND builtin = 0').bind(id),
     ]);
     cache.providers = undefined;
+    cache.keys = undefined;                      // 级联删除 keys，同步清 keys 缓存（防孤儿残留）
 }
 
 // =====================================================================
@@ -140,16 +145,18 @@ export async function deleteRoute(db: D1Database, id: string): Promise<void> {
 // Keys（secret 加密由调用方负责，这里只负责存取）
 // =====================================================================
 export async function getKeys(db: D1Database, providerId?: string): Promise<KeyRow[]> {
-    const sql = providerId
-        ? 'SELECT * FROM keys WHERE provider_id = ?1 ORDER BY created_at DESC'
-        : 'SELECT * FROM keys ORDER BY created_at DESC';
-    const { results } = providerId
-        ? await db.prepare(sql).bind(providerId).all()
-        : await db.prepare(sql).all();
-    return (results || []).map((r: any) => ({
-        id: r.id, name: r.name, provider_id: r.provider_id, secret: r.secret,
-        hint: r.hint, masked: r.masked, created_at: r.created_at, last_used: r.last_used,
-    })) as KeyRow[];
+    // 60s 进程级缓存：secret 为 AES-GCM 密文，内存缓存安全；写操作清缓存保证强一致
+    if (!cache.keys || expired(cache.keys.at)) {
+        const { results } = await db.prepare('SELECT * FROM keys ORDER BY created_at DESC').all();
+        cache.keys = {
+            data: (results || []).map((r: any) => ({
+                id: r.id, name: r.name, provider_id: r.provider_id, secret: r.secret,
+                hint: r.hint, masked: r.masked, created_at: r.created_at, last_used: r.last_used,
+            })) as KeyRow[],
+            at: Date.now(),
+        };
+    }
+    return providerId ? cache.keys.data.filter(k => k.provider_id === providerId) : cache.keys.data;
 }
 
 export async function saveKey(db: D1Database, k: KeyRow): Promise<void> {
@@ -161,15 +168,31 @@ export async function saveKey(db: D1Database, k: KeyRow): Promise<void> {
             hint=excluded.hint, masked=excluded.masked, last_used=excluded.last_used
     `).bind(k.id, k.name, k.provider_id, k.secret, k.hint, k.masked,
             k.created_at || Math.floor(Date.now() / 1000), k.last_used).run();
+    cache.keys = undefined;                      // 写后清缓存（强一致）
 }
 
 export async function deleteKey(db: D1Database, id: string): Promise<void> {
     await db.prepare('DELETE FROM keys WHERE id = ?1').bind(id).run();
+    cache.keys = undefined;                      // 写后清缓存（强一致）
 }
 
 // 记录 Key 最近使用时间（转发成功时调用，best-effort）
+// 节流：同一 key 60s 内只落一次 D1（高频流量下把每请求一次 UPDATE 降为每分钟一次/每 key）
+const touchThrottle = new Map<string, number>();     // keyId -> 上次落库时间(ms)
+
 export async function touchKey(db: D1Database, keyId: string): Promise<void> {
-    await db.prepare('UPDATE keys SET last_used = ?1 WHERE id = ?2').bind(Math.floor(Date.now() / 1000), keyId).run();
+    const now = Date.now();
+    const last = touchThrottle.get(keyId) || 0;
+    if (now - last < CACHE_TTL) return;              // 节流窗口内跳过（容忍 last_used 至多滞后 60s）
+    touchThrottle.set(keyId, now);
+    // 尽力同步内存缓存，未命中缓存时无所谓（下次全量读会带新值）
+    if (cache.keys) {
+        const row = cache.keys.data.find(k => k.id === keyId);
+        if (row) row.last_used = Math.floor(now / 1000);
+    }
+    try {
+        await db.prepare('UPDATE keys SET last_used = ?1 WHERE id = ?2').bind(Math.floor(now / 1000), keyId).run();
+    } catch (e) { console.error('[touchKey] failed:', e); }
 }
 
 // =====================================================================

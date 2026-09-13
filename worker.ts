@@ -8,6 +8,9 @@ import { logger } from 'hono/logger';
 import * as db from './db';
 import type { D1Database, ExecutionContext } from '@cloudflare/workers-types';
 
+// 版本号单一来源：/health、dashboard、前端 UI 全部引用此常量（升级时只改这一处 + package.json）
+const APP_VERSION = '3.7.0';
+
 // ---------- 类型 ----------
 interface Env {
     DB: D1Database;
@@ -169,33 +172,39 @@ function err(status: number, msg: string, type = 'invalid_request_error') {
 
 // =====================================================================
 // 主 fetch handler
+//   Hono app 为模块级单例：网关入口的第一个请求注册全部路由（appReady 门闩），
+//   之后 isolate 常驻期内所有请求复用同一路由表，env/ctx 经 Hono Context 注入
 // =====================================================================
+const app = new Hono<{ Bindings: Env }>();
+let appReady = false;
+
 export default {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-        const app = new Hono<{ Bindings: Env }>();
+        // ---------- 首次启动：路由注册 + 迁移内置供应商 + 老库补列（整个 isolate 只执行一次，幂等）----------
+        if (!appReady) {
+            appReady = true;
+            // CORS 仅对 /v1/* 开放（管理后台/健康检查均为同源浏览器访问，无需跨域）
+            app.use('/v1/*', cors({ origin: '*', credentials: false }));
+            app.use('*', logger());
 
-        // CORS 仅对 /v1/* 开放（管理后台/健康检查均为同源浏览器访问，无需跨域）
-        app.use('/v1/*', cors({ origin: '*', credentials: false }));
-        app.use('*', logger());
-
-        // ---------- 首次启动：迁移内置供应商 + 老库补列（整个 isolate 只执行一次，幂等）----------
-        if (!builtinsInit) {
-            builtinsInit = (async () => {
-                await db.migrateBuiltins(env.DB);
-                await db.ensureRouteModelMap(env.DB);   // 老库（含线上已部署库）自动补 model_map 列，幂等
-            })().catch((e) => console.error('init migrations failed:', e));
-        }
-        ctx.waitUntil(builtinsInit);
+            if (!builtinsInit) {
+                builtinsInit = (async () => {
+                    await db.migrateBuiltins(env.DB);
+                    await db.ensureRouteModelMap(env.DB);   // 老库（含线上已部署库）自动补 model_map 列，幂等
+                })().catch((e) => console.error('init migrations failed:', e));
+            }
+            ctx.waitUntil(builtinsInit);
 
         // ---------- 健康检查 ----------
-        app.get('/health', (c) => c.json({ ok: true, version: '3.7.0', storage: 'd1' }));
+        app.get('/health', (c) => c.json({ ok: true, version: APP_VERSION, storage: 'd1' }));
 
         // =================================================================
         // 代理转发（流式透传，CPU < 5ms，不 buffer 完整响应）
         // =================================================================
         // 鉴权：PROXY_KEY 优先；未配置时回退后台「调用信息」Token；两者都无则拒绝（绝不无鉴权放行）
-        const gwToken = env.PROXY_KEY || (await getSettingsCached(env)).apiToken;
+        // 在中间件内经 c.env 惰性计算：模块级 app 单例下，避免闭包捕获首个请求 env 的隐式假设
         app.use('/v1/*', async (c, next) => {
+            const gwToken = c.env.PROXY_KEY || (await getSettingsCached(c.env)).apiToken;
             if (!gwToken) return err(500, '网关 Token 未配置：请设置 PROXY_KEY 环境变量，或在管理后台「系统设置」中设置 Token', 'gateway_not_configured');
             const auth = c.req.header('authorization') || '';
             const token = auth.replace(/^Bearer\s+/i, '');
@@ -205,7 +214,7 @@ export default {
 
         // GET /v1/models — OpenAI 兼容模型清单（agent/SDK 接入前会先拉取此端点）
         app.get('/v1/models', async (c) => {
-            const providers = await db.getProviders(env.DB);
+            const providers = await db.getProviders(c.env.DB);
             const data: { id: string; object: string; owned_by: string }[] = [];
             for (const p of providers) {
                 if (!p.enabled) continue;
@@ -215,7 +224,7 @@ export default {
                     continue;
                 }
                 // 自定义供应商：best-effort 探测其 /models（60s 缓存），失败静默跳过
-                const probe = await probeProviderModels(env, p);
+                const probe = await probeProviderModels(c.env, p);
                 if (probe && probe.length) for (const mid of probe) data.push({ id: mid, object: 'model', owned_by: p.id });
             }
             return c.json({ object: 'list', data });
@@ -231,16 +240,16 @@ export default {
             // （诊断场景：透传上游真实错误，便于判断供应商/Key 是否可用）
             const directProvider = new URL(c.req.url).searchParams.get('direct_provider');
             if (directProvider) {
-                const providers = await db.getProviders(env.DB);
+                const providers = await db.getProviders(c.env.DB);
                 const p = providers.find(x => x.id === directProvider);
                 if (!p) return err(404, `直连供应商「${directProvider}」不存在：请在「供应商」页确认 ID`, 'provider_not_found');
                 if (p.protocol !== 'openai') return err(400, `供应商「${p.name}」协议为 ${p.protocol}，暂不支持直连（仅 openai 协议）`, 'unsupported_protocol');
-                const keys = await db.getKeys(env.DB, p.id);
+                const keys = await db.getKeys(c.env.DB, p.id);
                 if (!keys.length) return err(502, `供应商「${p.name}」未配置 Key，无法直连：请编辑供应商并添加 Key`, 'provider_unavailable');
                 let lastErr: any = null, lastStatus = 502;
                 for (const k of keys) {
                     let apiKey: string;
-                    try { apiKey = await decrypt(k.secret, await getEncryptKey(env)); }
+                    try { apiKey = await decrypt(k.secret, await getEncryptKey(c.env)); }
                     catch (e) { lastErr = new Error(`Key ${k.id} 解密失败（请确认 ENCRYPT_KEY 与保存该 Key 时一致）`); continue; }
                     const upstream = p.base_url + (p.base_url.endsWith('/') ? '' : '/') + 'chat/completions';
                     try {
@@ -249,8 +258,8 @@ export default {
                             headers: { 'content-type': 'application/json', 'authorization': 'Bearer ' + apiKey, ...p.headers },
                             body: JSON.stringify(body),
                             // CF 特有：带 body 的 fetch 必须 duplex: 'half'，否则抛异常
-                            duplex: 'half' as any,
-                        });
+                            duplex: 'half',
+                        } as any);
                         const res = await fetch(upstreamReq);
                         const latency = Date.now() - start;
                         if (!res.ok) {
@@ -261,12 +270,12 @@ export default {
                             lastErr = new Error(`[${p.id}] HTTP ${res.status} ${brief.slice(0, 300)}`);
                             lastStatus = res.status;
                             db.logRing.push({ model, provider: p.id, ok: false, latency_ms: latency, status: res.status });
-                            db.logRing.flush(env.DB);
+                            db.logRing.flush(c.env.DB);
                             continue;
                         }
-                        ctx.waitUntil(db.touchKey(env.DB, k.id));
+                        c.executionCtx.waitUntil(db.touchKey(c.env.DB, k.id));
                         db.logRing.push({ model, provider: p.id, ok: true, latency_ms: latency, status: res.status });
-                        db.logRing.flush(env.DB);
+                        db.logRing.flush(c.env.DB);
                         // 流式：直接透传 ReadableStream，零 buffer
                         if (body.stream && res.body) return new Response(res.body, { status: res.status, headers: res.headers });
                         const text = await res.text();
@@ -274,12 +283,12 @@ export default {
                     } catch (e) { lastErr = e; lastStatus = 502; continue; }
                 }
                 db.logRing.push({ model, provider: 'none', ok: false, latency_ms: Date.now() - start, status: lastStatus });
-                db.logRing.flush(env.DB);
+                db.logRing.flush(c.env.DB);
                 return err(lastStatus, `直连失败：${lastErr?.message || '无可用 Key'}`, 'upstream_error');
             }
 
             // 路由匹配：找命中的供应商（pattern 支持 * 通配，其余字符按字面匹配）
-            const routes = await db.getRoutes(env.DB);
+            const routes = await db.getRoutes(c.env.DB);
             const matched = routes
                 .filter(r => {
                     if (!r.enabled) return false;
@@ -291,23 +300,23 @@ export default {
             // 无匹配路由 → 明确 404（不再静默轮询全部启用的供应商）
             if (!matched) {
                 db.logRing.push({ model, provider: 'none', ok: false, latency_ms: Date.now() - start, status: 404 });
-                db.logRing.flush(env.DB);
+                db.logRing.flush(c.env.DB);
                 return err(404, `未配置模型「${model}」的转发路由：请先到管理后台「路由规则」添加匹配规则（如 pattern=* 的默认路由）`, 'model_not_found');
             }
 
-            const providers = await db.getProviders(env.DB);
+            const providers = await db.getProviders(c.env.DB);
             // 展开候选：严格按用户配置顺序 [providers..., fallback...]，同供应商多个 key 依次轮换
             const tryQueue: { p: db.Provider; k: db.KeyRow }[] = [];
             for (const pid of [...matched.providers, ...matched.fallback]) {
                 const p = providers.find(x => x.id === pid);
                 if (!p || p.protocol !== 'openai') continue;   // 非 openai 协议暂不支持，跳过
-                const keys = await db.getKeys(env.DB, p.id);
+                const keys = await db.getKeys(c.env.DB, p.id);
                 for (const k of keys) tryQueue.push({ p, k });
             }
 
             if (tryQueue.length === 0) {
                 db.logRing.push({ model, provider: 'none', ok: false, latency_ms: Date.now() - start, status: 502 });
-                db.logRing.flush(env.DB);
+                db.logRing.flush(c.env.DB);
                 return err(502, `路由「${matched.name || matched.id}」下没有可用的 openai 协议供应商或 Key，请先配置供应商 Key`, 'provider_unavailable');
             }
 
@@ -320,7 +329,7 @@ export default {
                 // 解密 secret（AES-GCM）；解密失败给出明确错误并尝试下一个 Key/供应商
                 let apiKey: string;
                 try {
-                    apiKey = await decrypt(k.secret, await getEncryptKey(env));
+                    apiKey = await decrypt(k.secret, await getEncryptKey(c.env));
                 } catch (e) {
                     lastErr = new Error(`key ${k.id} 解密失败（请确认 ENCRYPT_KEY 与保存该 Key 时一致）`);
                     continue;
@@ -333,8 +342,8 @@ export default {
                         headers: { 'content-type': 'application/json', 'authorization': 'Bearer ' + apiKey, ...p.headers },
                         body: JSON.stringify(upstreamBody),
                         // CF 特有：带 body 的 fetch 必须 duplex: 'half'，否则抛异常
-                        duplex: 'half' as any,
-                    });
+                        duplex: 'half',
+                    } as any);
                     const res = await fetch(upstreamReq);
                     const latency = Date.now() - start;
 
@@ -343,13 +352,13 @@ export default {
                         const errText = await res.text().catch(() => '');
                         lastErr = new Error(`[${p.id}] HTTP ${res.status} ${errText.slice(0, 300) || res.statusText}`);
                         db.logRing.push({ model, provider: p.id, ok: false, latency_ms: latency, status: res.status });
-                        db.logRing.flush(env.DB);
+                        db.logRing.flush(c.env.DB);
                         continue;
                     }
 
-                    ctx.waitUntil(db.touchKey(env.DB, k.id));
+                    c.executionCtx.waitUntil(db.touchKey(c.env.DB, k.id));
                     db.logRing.push({ model, provider: p.id, ok: true, latency_ms: latency, status: res.status });
-                    db.logRing.flush(env.DB);
+                    db.logRing.flush(c.env.DB);
 
                     // 流式：直接透传 ReadableStream，零 buffer
                     if (body.stream && res.body) {
@@ -364,7 +373,7 @@ export default {
             }
 
             db.logRing.push({ model, provider: 'none', ok: false, latency_ms: Date.now() - start, status: 502 });
-            db.logRing.flush(env.DB);
+            db.logRing.flush(c.env.DB);
             return err(502, `所有供应商均失败：${lastErr?.message || '无可用供应商'}`, 'upstream_error');
         });
 
@@ -376,17 +385,17 @@ export default {
         // API：认证（支持两种凭据来源：环境变量优先，其次 bootstrap 写入的 meta）
         // =================================================================
         app.get('/admin/api/bootstrap', async (c) => {
-            const { pass, secret } = await bootstrapMeta(env);
+            const { pass, secret } = await bootstrapMeta(c.env);
             return c.json({ required: !pass || !secret });
         });
         app.post('/admin/api/bootstrap', async (c) => {
             const { password = '', session_secret = '', current_password = '' } = await c.req.json().catch(() => ({})) as any;
             if (String(password).length < 6) return err(400, '管理员密码至少 6 位');
             if (String(session_secret).length < 12) return err(400, '会话密钥至少 12 位随机串');
-            const cur = await bootstrapMeta(env);
+            const cur = await bootstrapMeta(c.env);
             if (cur.pass || cur.secret) {
                 // 已初始化 → 重新初始化模式：必须提供当前密码校验，防止未授权重置
-                if (env.DEFAULT_ADMIN_PASS || env.SESSION_SECRET) {
+                if (c.env.DEFAULT_ADMIN_PASS || c.env.SESSION_SECRET) {
                     // env 优先：写入 meta 不会生效，直接引导改环境变量
                     return err(409, '当前凭据来自环境变量（DEFAULT_ADMIN_PASS / SESSION_SECRET），后台重置不会生效。请直接在 Cloudflare 控制台修改环境变量并重新部署；如需改用数据库凭据，请先删除这两个环境变量');
                 }
@@ -397,28 +406,28 @@ export default {
             }
             // 存 HMAC(password, session_secret)，即使库被读到也无法直接还原密码
             const hash = await hmacSha256(String(session_secret), String(password));
-            await db.metaSet(env.DB, 'admin_pass_hash', hash);
-            await db.metaSet(env.DB, 'session_secret', String(session_secret));
+            await db.metaSet(c.env.DB, 'admin_pass_hash', hash);
+            await db.metaSet(c.env.DB, 'session_secret', String(session_secret));
             return c.json({ ok: true, reinit: !!(cur.pass || cur.secret) });
         });
         // 修改登录密码（需已登录；旧密码校验通过后更新 meta 中的 admin_pass_hash）
         app.post('/admin/api/password', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
             const { old_password = '', new_password = '' } = await c.req.json().catch(() => ({})) as any;
             if (String(new_password).length < 6) return err(400, '新密码至少 6 位');
             if (typeof old_password !== 'string' || !old_password) return err(400, '请提供当前密码');
-            const { pass, secret } = await bootstrapMeta(env);
+            const { pass, secret } = await bootstrapMeta(c.env);
             if (!pass || !secret) return err(500, '未配置管理员密码（使用环境变量时请直接修改 DEFAULT_ADMIN_PASS）');
             // 密码来自环境变量时不允许通过后台修改（env 优先，改了 meta 也不生效），给出明确引导
-            if (env.DEFAULT_ADMIN_PASS) return err(409, '当前密码来自环境变量 DEFAULT_ADMIN_PASS，请直接在 Cloudflare 控制台修改环境变量并重新部署');
+            if (c.env.DEFAULT_ADMIN_PASS) return err(409, '当前密码来自环境变量 DEFAULT_ADMIN_PASS，请直接在 Cloudflare 控制台修改环境变量并重新部署');
             const verified = await hmacSha256(secret, old_password) === pass;
             if (!verified) return err(401, '当前密码错误');
             const hash = await hmacSha256(secret, String(new_password));
-            await db.metaSet(env.DB, 'admin_pass_hash', hash);
+            await db.metaSet(c.env.DB, 'admin_pass_hash', hash);
             return c.json({ ok: true });
         });
         app.post('/admin/api/login', async (c) => {
-            const { pass, secret } = await bootstrapMeta(env);
+            const { pass, secret } = await bootstrapMeta(c.env);
             if (!pass) {
                 return err(500, '未配置管理员密码：请设置 DEFAULT_ADMIN_PASS 环境变量，或先用下方「快速初始化」完成首次配置');
             }
@@ -434,8 +443,8 @@ export default {
             }
             const { password } = await c.req.json().catch(() => ({ password: '' }));
             let ok = false;
-            if (env.DEFAULT_ADMIN_PASS) {
-                ok = typeof password === 'string' && timingSafeEqual(password, env.DEFAULT_ADMIN_PASS);
+            if (c.env.DEFAULT_ADMIN_PASS) {
+                ok = typeof password === 'string' && timingSafeEqual(password, c.env.DEFAULT_ADMIN_PASS);
             } else {
                 ok = typeof password === 'string' && timingSafeEqual(await hmacSha256(secret, password), pass);
             }
@@ -461,14 +470,14 @@ export default {
         // API：Dashboard（聚合，与原版字段一致）
         // =================================================================
         app.get('/admin/api/dashboard', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
             const [providers, routes, keys, stats, recent, settings] = await Promise.all([
-                db.getProviders(env.DB),
-                db.getRoutes(env.DB),
-                db.getKeys(env.DB),
-                db.getStats(env.DB),
-                db.recentLogs(env.DB, 200),
-                db.getSettings(env.DB),
+                db.getProviders(c.env.DB),
+                db.getRoutes(c.env.DB),
+                db.getKeys(c.env.DB),
+                db.getStats(c.env.DB),
+                db.recentLogs(c.env.DB, 200),
+                db.getSettings(c.env.DB),
             ]);
 
             // 模型调用排行
@@ -496,7 +505,7 @@ export default {
             });
 
             return c.json({
-                version: '3.7.0',
+                version: APP_VERSION,
                 generatedAt: Date.now(),
                 storage: { mode: 'd1', writable: true, warning: null },
                 counts: { providers: providers.length, routes: routes.length, keys: keys.length },
@@ -513,26 +522,26 @@ export default {
         // API：Settings（调用信息 + 改 Token，与原版一致）
         // =================================================================
         app.get('/admin/api/settings', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
-            const s = await db.getSettings(env.DB);
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
+            const s = await db.getSettings(c.env.DB);
             return c.json({
-                projectName: s.projectName || env.PROJECT_NAME || 'iRouter',
-                baseUrl: s.baseUrl || env.BASE_URL || '',
-                apiToken: s.tokenMasked || maskToken(env.API_TOKEN || ''),
+                projectName: s.projectName || c.env.PROJECT_NAME || 'iRouter',
+                baseUrl: s.baseUrl || c.env.BASE_URL || '',
+                apiToken: s.tokenMasked || maskToken(c.env.API_TOKEN || ''),
             });
         });
 
         // API：在线聊天页获取明文调用 Token（仅管理员，用于直接调 /v1/chat/completions 验证转发链路）
         app.get('/admin/api/token', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
-            const s = await db.getSettings(env.DB);
-            return c.json({ token: s.apiToken || env.API_TOKEN || '' });
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
+            const s = await db.getSettings(c.env.DB);
+            return c.json({ token: s.apiToken || c.env.API_TOKEN || '' });
         });
 
         app.put('/admin/api/settings', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
             const body = await c.req.json().catch(() => ({})) as any;
-            const cur = await db.getSettings(env.DB);
+            const cur = await db.getSettings(c.env.DB);
             const next = { ...cur };
 
             if (typeof body.projectName === 'string') next.projectName = body.projectName;
@@ -550,7 +559,7 @@ export default {
                     next.tokenMasked = maskToken(t);
                 }
             }
-            await db.saveSettings(env.DB, next);
+            await db.saveSettings(c.env.DB, next);
             settingsCache.data = null;   // 使代理鉴权立即使用新 Token
             return c.json({ ok: true, settings: { ...next, apiToken: next.tokenMasked } });
         });
@@ -559,9 +568,9 @@ export default {
         // API：Providers（CRUD）
         // =================================================================
         app.get('/admin/api/providers', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
-            const providers = await db.getProviders(env.DB);
-            const keys = await db.getKeys(env.DB);   // 全部 Key（secret 密文剥离，仅回传摘要）
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
+            const providers = await db.getProviders(c.env.DB);
+            const keys = await db.getKeys(c.env.DB);   // 全部 Key（secret 密文剥离，仅回传摘要）
             // 白名单化返回：剥离 headers（可能含自定义密钥类请求头）与 providers.keys 列（历史明文残留），前端仅依赖以下字段
             return c.json(providers.map(p => ({
                 id: p.id, name: p.name, builtin: p.builtin, enabled: p.enabled,
@@ -572,7 +581,7 @@ export default {
             })));
         });
         app.post('/admin/api/providers', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
             const body = await c.req.json().catch(() => ({})) as any;
             const p: db.Provider = {
                 id: body.id || 'p_' + Date.now(),
@@ -586,11 +595,11 @@ export default {
                 created_at: Math.floor(Date.now() / 1000),
                 updated_at: Math.floor(Date.now() / 1000),
             };
-            await db.saveProvider(env.DB, p);
+            await db.saveProvider(c.env.DB, p);
             // API Key 合并进供应商：创建时可直接携带 key（AES-GCM 加密存储）
             const rawKey = String(body.key || '').trim();
             if (rawKey) {
-                const ek = await getEncryptKey(env);
+                const ek = await getEncryptKey(c.env);
                 if (!ek) return err(500, '加密密钥暂不可用，请重试');
                 const k: db.KeyRow = {
                     id: 'k_' + Date.now(), name: body.keyName || '',
@@ -598,14 +607,14 @@ export default {
                     hint: rawKey.slice(-4), masked: '****' + rawKey.slice(-4),
                     created_at: Math.floor(Date.now() / 1000), last_used: 0,
                 };
-                await db.saveKey(env.DB, k);
+                await db.saveKey(c.env.DB, k);
             }
             return c.json({ ok: true, id: p.id }, 201);
         });
         app.put('/admin/api/providers/:id', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
             const id = c.req.param('id');
-            const cur = await db.getProvider(env.DB, id);
+            const cur = await db.getProvider(c.env.DB, id);
             if (!cur) return err(404, '供应商不存在');
             const body = await c.req.json().catch(() => ({})) as any;
             const next: db.Provider = {
@@ -618,11 +627,11 @@ export default {
                 keys: [],                    // 清空历史残留的 providers.keys 明文列（密钥统一走独立 keys 表）
                 updated_at: Math.floor(Date.now() / 1000),
             };
-            await db.saveProvider(env.DB, next);
+            await db.saveProvider(c.env.DB, next);
             // 追加新 Key（可选）
             const rawKey = String(body.key || '').trim();
             if (rawKey) {
-                const ek = await getEncryptKey(env);
+                const ek = await getEncryptKey(c.env);
                 if (!ek) return err(500, '加密密钥暂不可用，请重试');
                 const k: db.KeyRow = {
                     id: 'k_' + Date.now(), name: body.keyName || '',
@@ -630,30 +639,30 @@ export default {
                     hint: rawKey.slice(-4), masked: '****' + rawKey.slice(-4),
                     created_at: Math.floor(Date.now() / 1000), last_used: 0,
                 };
-                await db.saveKey(env.DB, k);
+                await db.saveKey(c.env.DB, k);
             }
             // 移除指定 Key（remove_keys：单个 id 字符串或数组）
             const rm = body.remove_keys;
             const rmList = Array.isArray(rm) ? rm : (typeof rm === 'string' && rm ? [rm] : []);
-            for (const kid of rmList) { if (kid) await db.deleteKey(env.DB, String(kid)); }
+            for (const kid of rmList) { if (kid) await db.deleteKey(c.env.DB, String(kid)); }
             return c.json({ ok: true });
         });
         app.delete('/admin/api/providers/:id', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
-            await db.deleteProvider(env.DB, c.req.param('id'));
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
+            await db.deleteProvider(c.env.DB, c.req.param('id'));
             return c.json({ ok: true });
         });
         // 供应商测试连接：实际用第一个 Key 请求上游 /models，给出可读结论（不写日志、不 touch key）
         app.post('/admin/api/providers/:id/test', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
             const id = c.req.param('id');
-            const p = await db.getProvider(env.DB, id);
+            const p = await db.getProvider(c.env.DB, id);
             if (!p) return err(404, '供应商不存在');
-            const keys = await db.getKeys(env.DB, id);
+            const keys = await db.getKeys(c.env.DB, id);
             if (keys.length === 0) return c.json({ ok: false, message: '该供应商还没有 Key，请先添加 Key 再测试' });
             let apiKey: string;
             try {
-                apiKey = await decrypt(keys[0].secret, await getEncryptKey(env));
+                apiKey = await decrypt(keys[0].secret, await getEncryptKey(c.env));
             } catch {
                 return c.json({ ok: false, message: 'Key 解密失败：可能与保存时的 ENCRYPT_KEY 不一致，请重新保存 Key' });
             }
@@ -677,13 +686,13 @@ export default {
 
         // API：在线聊天页获取指定供应商可用模型（内置目录优先，自定义 go probeProviderModels 60s 缓存）
         app.get('/admin/api/providers/:id/models', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
             const id = c.req.param('id');
-            const p = await db.getProvider(env.DB, id);
+            const p = await db.getProvider(c.env.DB, id);
             if (!p) return err(404, '供应商不存在');
             const builtin = MODEL_CATALOG[p.id];
             if (builtin?.length) return c.json({ models: builtin });
-            const models = await probeProviderModels(env, p);
+            const models = await probeProviderModels(c.env, p);
             return c.json({ models });
         });
 
@@ -691,11 +700,11 @@ export default {
         // API：Routes（CRUD，app.put 修复，无 app.set）
         // =================================================================
         app.get('/admin/api/routes', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
-            return c.json(await db.getRoutes(env.DB));
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
+            return c.json(await db.getRoutes(c.env.DB));
         });
         app.post('/admin/api/routes', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
             const body = await c.req.json().catch(() => ({})) as any;
             const rt: db.Route = {
                 id: 'r_' + Date.now(),
@@ -708,13 +717,13 @@ export default {
                 model_map: body.model_map && typeof body.model_map === 'object' ? body.model_map : {},
                 created_at: Math.floor(Date.now() / 1000),
             };
-            await db.saveRoute(env.DB, rt);
+            await db.saveRoute(c.env.DB, rt);
             return c.json({ ok: true, id: rt.id }, 201);
         });
         app.put('/admin/api/routes/:id', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
             const id = c.req.param('id');
-            const routes = await db.getRoutes(env.DB);
+            const routes = await db.getRoutes(c.env.DB);
             const cur = routes.find(r => r.id === id);
             if (!cur) return err(404, '路由不存在');
             const body = await c.req.json().catch(() => ({})) as any;
@@ -728,12 +737,12 @@ export default {
                 enabled: body.enabled ?? cur.enabled,
                 model_map: body.model_map && typeof body.model_map === 'object' ? body.model_map : cur.model_map,
             };
-            await db.saveRoute(env.DB, next);
+            await db.saveRoute(c.env.DB, next);
             return c.json({ ok: true });
         });
         app.delete('/admin/api/routes/:id', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
-            await db.deleteRoute(env.DB, c.req.param('id'));
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
+            await db.deleteRoute(c.env.DB, c.req.param('id'));
             return c.json({ ok: true });
         });
 
@@ -741,13 +750,13 @@ export default {
         // API：Keys（CRUD，secret 加密存储）
         // =================================================================
         app.get('/admin/api/keys', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
-            const keys = await db.getKeys(env.DB);
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
+            const keys = await db.getKeys(c.env.DB);
             return c.json({ ok: true, data: keys.map(k => ({ ...k, secret: '' })), encryptReady: true });   // 列表不返回密文；加密密钥自动就绪（env 或 meta 懒生成）
         });
         app.post('/admin/api/keys', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
-            const ek = await getEncryptKey(env);
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
+            const ek = await getEncryptKey(c.env);
             if (!ek) return err(500, '加密密钥暂不可用：请设置 ENCRYPT_KEY 环境变量后重试');   // 双保险：meta 读写异常时兜底提示
             const body = await c.req.json().catch(() => ({})) as any;
             if (!body.secret) return err(400, 'secret required');
@@ -762,12 +771,12 @@ export default {
                 created_at: Math.floor(Date.now() / 1000),
                 last_used: 0,
             };
-            await db.saveKey(env.DB, k);
+            await db.saveKey(c.env.DB, k);
             return c.json({ ok: true, id: k.id }, 201);
         });
         app.delete('/admin/api/keys/:id', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
-            await db.deleteKey(env.DB, c.req.param('id'));
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
+            await db.deleteKey(c.env.DB, c.req.param('id'));
             return c.json({ ok: true });
         });
 
@@ -775,18 +784,15 @@ export default {
         // API：Storage status
         // =================================================================
         app.get('/admin/api/storage/status', async (c) => {
-            if (!(await isAdmin(c.req.raw, env))) return err(401, 'Unauthorized');
+            if (!(await isAdmin(c.req.raw, c.env))) return err(401, 'Unauthorized');
             // D1 永远可写（只要绑定正确），这里做一次轻量探测
             try {
-                await env.DB.prepare('SELECT 1 FROM meta LIMIT 1').all();
+                await c.env.DB.prepare('SELECT 1 FROM meta LIMIT 1').all();
                 return c.json({ mode: 'd1', writable: true, warning: null });
             } catch (e) {
                 return c.json({ mode: 'd1', writable: false, warning: String(e) }, 500);
             }
         });
-
-        // ---------- 启动定时 flush（best-effort，Workers 空闲会被取消，定量 flush 兜底）----------
-        db.logRing.startTimer(env.DB);
 
         // ---------- SPA 兜底路由：必须在所有 /admin/api/* 之后声明，否则会拦截 API ----------
         // 首页 = 管理后台预览：/ 与 /admin 返回同一 SPA，前端 init() 自动探测登录态
@@ -794,6 +800,10 @@ export default {
         app.get('/', (c) => c.html(ADMIN_HTML));
         app.get('/admin', (c) => c.html(ADMIN_HTML));
         app.get('/admin/*', (c) => c.html(ADMIN_HTML));
+        }   // ===== appReady 门闩结束：以上全部路由注册仅执行一次，isolate 常驻期复用同一路由表 =====
+
+        // ---------- 启动定时 flush（best-effort，Workers 空闲会被取消，定量 flush 兜底）----------
+        db.logRing.startTimer(env.DB);
 
         return app.fetch(request);
     },
@@ -1025,7 +1035,7 @@ const ADMIN_HTML = `<!DOCTYPE html>
 </div>
 <div class="layout">
   <aside class="sidebar">
-    <div class="brand"><div class="brand-text"><h1>iRouter<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button></h1><small>智能路由网关 v3.7.0</small></div></div>
+    <div class="brand"><div class="brand-text"><h1>iRouter<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button></h1><small>智能路由网关 v${APP_VERSION}</small></div></div>
     <nav class="nav">
       <a href="#dashboard" class="active" data-view="dashboard">🏠 首页</a>
       <a href="#providers" data-view="providers">⚙️ 供应商</a>
@@ -1380,7 +1390,7 @@ function render_conn(s){
            + '  -H "Content-Type: application/json" \\\\\\n'
            + '  -d \\'{ "model": "gpt-4o-mini", "messages": [{"role":"user","content":"hello"}] }\\'';
   document.getElementById('conn').innerHTML = ''
-    + row_html('🏷️ 项目名', esc(s.projectName||'iRouter')+' <span class="badge ok">v3.7.0 · D1</span>')
+    + row_html('🏷️ 项目名', esc(s.projectName||'iRouter')+' <span class="badge ok">v${APP_VERSION} · D1</span>')
     + row_html('🌐 网关 Base URL', '<code id="conn-url">'+esc(baseUrl)+'</code> <span class="copy" onclick="copyText(\\'conn-url\\')">📋 复制</span>')
     + row_html('🔑 调用 Token', '<code id="conn-token">'+esc(token)+'</code> <span class="copy" onclick="copyText(\\'conn-token\\')">📋 复制</span>')
     + '<div style="margin-top:14px"><label style="font-size:12px;color:var(--muted)">📦 快速调用示例（curl）</label><pre id="conn-curl">'+esc(curl)+'</pre><span class="copy" onclick="copyText(\\'conn-curl\\')">📋 复制</span></div>';
@@ -1398,7 +1408,9 @@ function render_settings_form(s){
 }
 window.genApiToken=function(){
   var c='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';var s='sk-';
-  for(var i=0;i<32;i++)s+=c[Math.floor(Math.random()*c.length)];
+  var buf=new Uint32Array(32);
+  try{ crypto.getRandomValues(buf); }catch(e){ throw new Error('secure RNG unavailable'); }
+  for(var i=0;i<32;i++)s+=c[buf[i]%c.length];
   var el=document.getElementById('f-token');if(!el)return;
   el.value=s;toast('🎲 已自动生成新 Token，点击「保存」生效');
 };
@@ -1552,7 +1564,7 @@ function render_guide(main){
 function render_guide_mini(){
   var mount=document.getElementById('guide-mount');
   if(!mount) return;
-  mount.innerHTML='<div class="panel" style="border-color:var(--accent)"><h3>👋 欢迎使用 iRouter v3.7.0（Cloudflare D1 版）</h3><div id="guide-mini-body"></div><button class="btn ghost" onclick="document.getElementById(\\'guide-mount\\').innerHTML=\\'\\'">关闭</button></div>';
+  mount.innerHTML='<div class="panel" style="border-color:var(--accent)"><h3>👋 欢迎使用 iRouter v${APP_VERSION}（Cloudflare D1 版）</h3><div id="guide-mini-body"></div><button class="btn ghost" onclick="document.getElementById(\\'guide-mount\\').innerHTML=\\'\\'">关闭</button></div>';
   render_guide_content(document.getElementById('guide-mini-body'), true);
   if(!localStorage.getItem('irouter_guide_dismissed')){
     setTimeout(function(){var b=document.getElementById('guide-mini-body');if(b) render_guide_content(b,true);},50);
@@ -1623,7 +1635,7 @@ function render_setup(reinit){
     +'<button class="btn" style="width:100%;padding:11px" onclick="doSetup('+(reinit?'true':'false')+')">'+(reinit?'确认重新初始化':'完成初始化，去登录')+'</button>'
     +'<p style="font-size:11px;color:var(--muted);margin-top:14px;text-align:center">凭据仅加密存储于 D1 数据库 meta 中，不占环境变量</p></div>';
 }
-window.genSecret=function(){var c='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';var s='';for(var i=0;i<24;i++)s+=c[Math.floor(Math.random()*c.length)];document.getElementById('s-secret').value=s;};
+window.genSecret=function(){var c='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';var s='';var buf=new Uint32Array(24);try{crypto.getRandomValues(buf);}catch(e){throw new Error('secure RNG unavailable');}for(var i=0;i<24;i++)s+=c[buf[i]%c.length];document.getElementById('s-secret').value=s;};
 window.doSetup=function(reinit){
   var p=document.getElementById('s-pass').value, s=document.getElementById('s-secret').value.trim();
   if(p.length<6){toast('❌ 密码至少 6 位');return;}
