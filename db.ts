@@ -6,7 +6,7 @@
 //   3. request_logs 采用 RingBuffer：内存聚合 + 60s 批量 INSERT，表保留最近 2000 条
 //   4. meta 表存零散 config（key-value），兼容旧版 KV 的 config/stats/settings 结构
 
-import type { D1Database } from '@cloudflare/workers-types';
+// @cloudflare/workers-types 5.x 为全局声明（tsconfig types 已注入），D1Database 直接用全局类型
 
 // ---------- 类型（与原 KV 版保持一致，路由层 / 前端无需改动）----------
 export interface Provider {

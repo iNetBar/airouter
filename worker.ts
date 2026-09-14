@@ -6,7 +6,8 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import * as db from './db';
-import type { D1Database, ExecutionContext } from '@cloudflare/workers-types';
+// @cloudflare/workers-types 5.x 为全局声明（tsconfig types 已注入），
+// D1Database / ExecutionContext 直接使用全局类型，无需 import type
 
 // 版本号单一来源：/health、dashboard、前端 UI 全部引用此常量（升级时只改这一处 + package.json）
 const APP_VERSION = '3.7.0';
@@ -104,6 +105,267 @@ function upstreamHeaders(h: Headers): Headers {
     const out = new Headers();
     h.forEach((v, k) => { if (UPSTREAM_HEADER_WHITELIST.has(k.toLowerCase())) out.set(k, v); });
     return out;
+}
+
+// ---------- gemini 协议转换（/v1/chat/completions OpenAI 格式 ↔ Gemini generateContent） ----------
+// OpenAI chat → Gemini generateContent 请求体（system 拆到 systemInstruction，assistant→model）
+function openaiToGemini(body: any, _upstreamModel: string): any {
+    const messages: any[] = Array.isArray(body.messages) ? body.messages : [];
+    const systemText = messages
+        .filter(m => m.role === 'system')
+        .map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? '')))
+        .join('\n');
+    const contents = messages
+        .filter(m => m.role !== 'system')
+        .map(m => ({
+            role: m.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? '') }],
+        }));
+    const gen: Record<string, unknown> = {};
+    if (body.temperature != null) gen.temperature = body.temperature;
+    if (body.max_tokens != null) gen.maxOutputTokens = body.max_tokens;
+    if (body.top_p != null) gen.topP = body.top_p;
+    if (body.stop != null) gen.stopSequences = Array.isArray(body.stop) ? body.stop : [body.stop];
+    const out: any = { contents };
+    if (systemText) out.systemInstruction = { parts: [{ text: systemText }] };
+    if (Object.keys(gen).length) out.generationConfig = gen;
+    return out;
+}
+
+// Gemini generateContent 响应 → OpenAI chat.completion
+function geminiToOpenAI(json: any, model: string, id: string): any {
+    const cand = json?.candidates?.[0];
+    const text = (cand?.content?.parts || []).map((p: any) => (typeof p?.text === 'string' ? p.text : '')).join('') || '';
+    const usage = json?.usageMetadata || {};
+    return {
+        id,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model,
+        choices: [{
+            index: 0,
+            message: { role: 'assistant', content: text },
+            finish_reason: cand?.finishReason ? String(cand.finishReason).toLowerCase() : 'stop',
+        }],
+        usage: {
+            prompt_tokens: usage.promptTokenCount ?? 0,
+            completion_tokens: usage.candidatesTokenCount ?? 0,
+            total_tokens: usage.totalTokenCount ?? 0,
+        },
+    };
+}
+
+// Gemini SSE（?alt=sse 逐条 data: {json}）→ OpenAI SSE（chat.completion.chunk + [DONE]）流转换
+function geminiSSEToOpenAIStream(src: ReadableStream, model: string, id: string): ReadableStream {
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+    let buf = '';
+    const pushSSE = (obj: unknown, controller: ReadableStreamDefaultController) =>
+        controller.enqueue(enc.encode('data: ' + JSON.stringify(obj) + '\n\n'));
+    const handleLine = (line: string, controller: ReadableStreamDefaultController) => {
+        const t = line.trim();
+        if (!t.startsWith('data:')) return;
+        const payload = t.slice(5).trim();
+        if (!payload) return;
+        let chunk: any;
+        try { chunk = JSON.parse(payload); } catch { return; }
+        const text = (chunk?.candidates?.[0]?.content?.parts || []).map((p: any) => (typeof p?.text === 'string' ? p.text : '')).join('');
+        if (!text) return;
+        pushSSE({
+            id, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model,
+            choices: [{ index: 0, delta: { content: text }, finish_reason: null }],
+        }, controller);
+    };
+    return new ReadableStream({
+        async start(controller) {
+            const reader = src.getReader();
+            try {
+                for (;;) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buf += dec.decode(value, { stream: true });
+                    let nl: number;
+                    while ((nl = buf.indexOf('\n')) >= 0) {
+                        handleLine(buf.slice(0, nl), controller);
+                        buf = buf.slice(nl + 1);
+                    }
+                }
+                if (buf.trim()) handleLine(buf, controller);
+                controller.enqueue(enc.encode('data: [DONE]\n\n'));
+            } catch (e) {
+                controller.error(e);
+            } finally {
+                reader.releaseLock();
+            }
+        },
+    });
+}
+
+// ---------- OpenAI Responses API（/v1/responses）兼容：responses 请求 ↔ chat/completions 转换 ----------
+// /v1/responses 请求体 → /v1/chat/completions 请求体（instructions→system，input 归一为 messages）
+function responsesToChat(body: any): any {
+    const messages: any[] = [];
+    if (body.instructions != null) {
+        messages.push({ role: 'system', content: typeof body.instructions === 'string' ? body.instructions : JSON.stringify(body.instructions) });
+    }
+    const input = body.input;
+    if (typeof input === 'string') {
+        messages.push({ role: 'user', content: input });
+    } else if (Array.isArray(input)) {
+        for (const it of input) {
+            if (typeof it === 'string') { messages.push({ role: 'user', content: it }); continue; }
+            if (!it || typeof it !== 'object') continue;
+            const role = it.role === 'assistant' ? 'assistant' : 'user';
+            const isMessage = it.type === 'message' || (it.role && !it.type);
+            if (isMessage) {
+                if (typeof it.content === 'string') { messages.push({ role, content: it.content }); continue; }
+                if (Array.isArray(it.content)) {
+                    const text = it.content
+                        .filter((x: any) => x && (x.text != null || x.type === 'input_text' || x.type === 'output_text'))
+                        .map((x: any) => (typeof x?.text === 'string' ? x.text : ''))
+                        .join('');
+                    messages.push({ role, content: text });
+                }
+            }
+            // 其它类型的 input item（function_call_output 等）本轮忽略，避免转换错误
+        }
+    }
+    const chat: any = { model: body.model, messages, stream: !!body.stream };
+    if (body.temperature != null) chat.temperature = body.temperature;
+    if (body.top_p != null) chat.top_p = body.top_p;
+    const mt = body.max_output_tokens ?? body.max_tokens;
+    if (mt != null) chat.max_tokens = mt;
+    if (body.stop != null) chat.stop = body.stop;
+    if (Array.isArray(body.tools) && body.tools.length) {
+        chat.tools = body.tools
+            .filter((t: any) => t && (t.type === 'function' || (t.name && !t.type)))
+            .map((t: any) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } }));
+    }
+    if (body.tool_choice != null) chat.tool_choice = body.tool_choice;
+    return chat;
+}
+
+// chat.completion → responses 响应（output 含 message + function_call items）
+function chatToResponses(json: any, model: string): any {
+    const choice = json?.choices?.[0];
+    const msg = choice?.message || {};
+    const content = typeof msg.content === 'string' ? msg.content : '';
+    const toolItems = (msg.tool_calls || []).map((tc: any) => ({
+        type: 'function_call', id: tc.id, call_id: tc.id,
+        name: tc.function?.name || '', arguments: tc.function?.arguments || '',
+    }));
+    const u = json?.usage || {};
+    return {
+        id: 'resp_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24),
+        object: 'response',
+        created_at: Math.floor(Date.now() / 1000),
+        status: choice?.finish_reason === 'length' ? 'incomplete' : 'completed',
+        model,
+        output: [
+            {
+                type: 'message', id: 'msg_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24), status: 'completed', role: 'assistant',
+                content: content ? [{ type: 'output_text', text: content, annotations: [] }] : [],
+            },
+            ...toolItems,
+        ],
+        usage: { input_tokens: u.prompt_tokens ?? 0, output_tokens: u.completion_tokens ?? 0, total_tokens: u.total_tokens ?? 0 },
+        service_tier: 'auto',
+    };
+}
+
+// chat.completion.chunk SSE 流 → responses 事件流（response.created / output_item.added / output_text.delta / … / response.completed / [DONE]）
+function chatSSEToResponsesStream(src: ReadableStream, model: string): ReadableStream {
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+    let buf = '';
+    let started = false;
+    let fullText = '';
+    const toolAgg: Record<string, { id: string; name: string; args: string }> = {};
+    let lastUsage: any = null;
+    const rid = 'resp_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24);
+    const mid = 'msg_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24);
+    const created = Math.floor(Date.now() / 1000);
+    const send = (obj: unknown, controller: ReadableStreamDefaultController) =>
+        controller.enqueue(enc.encode('data: ' + JSON.stringify(obj) + '\n\n'));
+    const ensureHead = (controller: ReadableStreamDefaultController) => {
+        if (started) return;
+        started = true;
+        send({ type: 'response.created', response: { id: rid, object: 'response', created_at: created, status: 'in_progress', model, output: [] } }, controller);
+        send({ type: 'response.output_item.added', output_index: 0, item: { id: mid, type: 'message', status: 'in_progress', role: 'assistant', content: [] } }, controller);
+        send({ type: 'response.content_part.added', item_id: mid, output_index: 0, content_index: 0, part: { type: 'output_text', text: '', annotations: [] } }, controller);
+    };
+    const handleLine = (line: string, controller: ReadableStreamDefaultController) => {
+        const t = line.trim();
+        if (!t.startsWith('data:')) return;
+        const payload = t.slice(5).trim();
+        if (!payload || payload === '[DONE]') return;
+        let chunk: any;
+        try { chunk = JSON.parse(payload); } catch { return; }
+        const c0 = chunk?.choices?.[0];
+        if (!c0) { if (chunk?.usage) lastUsage = chunk.usage; return; }
+        ensureHead(controller);
+        const delta = c0.delta || {};
+        if (typeof delta.content === 'string' && delta.content) {
+            fullText += delta.content;
+            send({ type: 'response.output_text.delta', item_id: mid, output_index: 0, content_index: 0, delta: delta.content }, controller);
+        }
+        if (Array.isArray(delta.tool_calls)) {
+            for (const tc of delta.tool_calls) {
+                const idx = String(tc.index ?? 0);
+                const cur = toolAgg[idx] || { id: tc.id || ('call_' + crypto.randomUUID().replace(/-/g, '').slice(0, 12)), name: '', args: '' };
+                if (tc.id) cur.id = tc.id;
+                if (tc.function?.name) cur.name += tc.function.name;
+                if (typeof tc.function?.arguments === 'string') cur.args += tc.function.arguments;
+                toolAgg[idx] = cur;
+            }
+        }
+    };
+    return new ReadableStream({
+        async start(controller) {
+            const reader = src.getReader();
+            try {
+                for (;;) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buf += dec.decode(value, { stream: true });
+                    let nl: number;
+                    while ((nl = buf.indexOf('\n')) >= 0) {
+                        handleLine(buf.slice(0, nl), controller);
+                        buf = buf.slice(nl + 1);
+                    }
+                }
+                if (buf.trim()) handleLine(buf, controller);
+                ensureHead(controller); // 上游无输出也给出最小合法事件序列
+                const toolItems = Object.keys(toolAgg).sort((a, b) => Number(a) - Number(b)).map(i => ({
+                    type: 'function_call', id: toolAgg[i].id, call_id: toolAgg[i].id,
+                    name: toolAgg[i].name, arguments: toolAgg[i].args,
+                }));
+                const outItems: any[] = [
+                    {
+                        type: 'message', id: mid, status: 'completed', role: 'assistant',
+                        content: [{ type: 'output_text', text: fullText, annotations: [] }],
+                    },
+                    ...toolItems,
+                ];
+                send({ type: 'response.output_text.done', item_id: mid, output_index: 0, content_index: 0, text: fullText }, controller);
+                send({ type: 'response.content_part.done', item_id: mid, output_index: 0, content_index: 0, part: { type: 'output_text', text: fullText, annotations: [] } }, controller);
+                send({ type: 'response.output_item.done', output_index: 0, item: outItems[0] }, controller);
+                const uu = lastUsage || {};
+                send({
+                    type: 'response.completed',
+                    response: {
+                        id: rid, object: 'response', created_at: created, status: 'completed', model, output: outItems,
+                        usage: { input_tokens: uu.prompt_tokens ?? 0, output_tokens: uu.completion_tokens ?? 0, total_tokens: uu.total_tokens ?? 0 },
+                    },
+                }, controller);
+                controller.enqueue(enc.encode('data: [DONE]\n\n'));
+            } catch (e) {
+                controller.error(e);
+            } finally {
+                reader.releaseLock();
+            }
+        },
+    });
 }
 
 // =====================================================================
@@ -265,7 +527,7 @@ export default {
                 const providers = await db.getProviders(c.env.DB);
                 const p = providers.find(x => x.id === directProvider);
                 if (!p) return err(404, `直连供应商「${directProvider}」不存在：请在「供应商」页确认 ID`, 'provider_not_found');
-                if (p.protocol !== 'openai') return err(400, `供应商「${p.name}」协议为 ${p.protocol}，暂不支持直连（仅 openai 协议）`, 'unsupported_protocol');
+                if (p.protocol !== 'openai') return err(400, `供应商「${p.name}」协议为 ${p.protocol}：anthropic 请改用 POST /v1/messages?direct_provider=${p.id}，gemini 请通过路由规则经 /v1/chat/completions 转发`, 'unsupported_protocol');
                 const keys = await db.getKeys(c.env.DB, p.id);
                 if (!keys.length) return err(502, `供应商「${p.name}」未配置 Key，无法直连：请编辑供应商并添加 Key`, 'provider_unavailable');
                 let lastErr: any = null, lastStatus = 502;
@@ -331,7 +593,8 @@ export default {
             const tryQueue: { p: db.Provider; k: db.KeyRow }[] = [];
             for (const pid of [...matched.providers, ...matched.fallback]) {
                 const p = providers.find(x => x.id === pid);
-                if (!p || p.protocol !== 'openai') continue;   // 非 openai 协议暂不支持，跳过
+                // 协议：openai 原样转发；gemini 经 /v1/chat/completions 做 OpenAI↔Gemini 转换；anthropic 请走 /v1/messages（本端点不转换）
+                if (!p || (p.protocol !== 'openai' && p.protocol !== 'gemini')) continue;
                 const keys = await db.getKeys(c.env.DB, p.id);
                 for (const k of keys) tryQueue.push({ p, k });
             }
@@ -339,7 +602,7 @@ export default {
             if (tryQueue.length === 0) {
                 db.logRing.push({ model, provider: 'none', ok: false, latency_ms: Date.now() - start, status: 502 });
                 db.logRing.flush(c.env.DB);
-                return err(502, `路由「${matched.name || matched.id}」下没有可用的 openai 协议供应商或 Key，请先配置供应商 Key`, 'provider_unavailable');
+                return err(502, `路由「${matched.name || matched.id}」下没有可用的 openai/gemini 协议供应商或 Key，请先配置供应商 Key（anthropic 供应商请使用 /v1/messages）`, 'provider_unavailable');
             }
 
             // 模型名改写：路由 model_map 里命中则替换上游 model（agent 请求名 → 供应商实际模型名）
@@ -357,15 +620,27 @@ export default {
                     continue;
                 }
 
-                const upstream = p.base_url + (p.base_url.endsWith('/') ? '' : '/') + 'chat/completions';
                 try {
-                    const upstreamReq = new Request(upstream, {
-                        method: 'POST',
-                        headers: { 'content-type': 'application/json', 'authorization': 'Bearer ' + apiKey, ...p.headers },
-                        body: JSON.stringify(upstreamBody),
-                        // CF 特有：带 body 的 fetch 必须 duplex: 'half'，否则抛异常
-                        duplex: 'half',
-                    } as any);
+                    // 按协议构造上游请求：openai 原样转 /chat/completions；gemini 转为 generateContent（流式加 ?alt=sse）
+                    let upstreamReq: Request;
+                    if (p.protocol === 'gemini') {
+                        const gUrl = p.base_url + (p.base_url.endsWith('/') ? '' : '/') + 'models/' + encodeURIComponent(upstreamModel) + ':generateContent' + (body.stream ? '?alt=sse' : '');
+                        upstreamReq = new Request(gUrl, {
+                            method: 'POST',
+                            headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey, ...p.headers },
+                            body: JSON.stringify(openaiToGemini(upstreamBody, upstreamModel)),
+                            // CF 特有：带 body 的 fetch 必须 duplex: 'half'，否则抛异常
+                            duplex: 'half',
+                        } as any);
+                    } else {
+                        const upstream = p.base_url + (p.base_url.endsWith('/') ? '' : '/') + 'chat/completions';
+                        upstreamReq = new Request(upstream, {
+                            method: 'POST',
+                            headers: { 'content-type': 'application/json', 'authorization': 'Bearer ' + apiKey, ...p.headers },
+                            body: JSON.stringify(upstreamBody),
+                            duplex: 'half',
+                        } as any);
+                    }
                     const res = await fetch(upstreamReq);
                     const latency = Date.now() - start;
 
@@ -382,7 +657,17 @@ export default {
                     db.logRing.push({ model, provider: p.id, ok: true, latency_ms: latency, status: res.status });
                     db.logRing.flush(c.env.DB);
 
-                    // 流式：直接透传 ReadableStream，零 buffer
+                    // gemini：响应转换为 OpenAI 格式（非流式 json / 流式 SSE chunk 流）
+                    if (p.protocol === 'gemini') {
+                        const cid = 'chatcmpl-' + crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+                        if (body.stream && res.body) {
+                            return new Response(geminiSSEToOpenAIStream(res.body, upstreamModel, cid), { status: res.status, headers: { 'content-type': 'text/event-stream' } });
+                        }
+                        const gJson = await res.json().catch(() => ({}));
+                        return new Response(JSON.stringify(geminiToOpenAI(gJson, upstreamModel, cid)), { status: res.status, headers: { 'content-type': 'application/json' } });
+                    }
+
+                    // openai 流式：直接透传 ReadableStream，零 buffer
                     if (body.stream && res.body) {
                         return new Response(res.body, { status: res.status, headers: upstreamHeaders(res.headers) });
                     }
@@ -397,6 +682,170 @@ export default {
             db.logRing.push({ model, provider: 'none', ok: false, latency_ms: Date.now() - start, status: 502 });
             db.logRing.flush(c.env.DB);
             return err(502, `所有供应商均失败：${lastErr?.message || '无可用供应商'}`, 'upstream_error');
+        });
+
+        // =================================================================
+        // OpenAI Responses API 兼容：POST /v1/responses
+        // 请求体转 /v1/chat/completions 格式后内部 self-request 复用同一套鉴权/路由/兜底转发，
+        // 响应（含流式）转回 responses 事件格式。SDK 用法与 /v1/chat/completions 一致（Bearer Token）。
+        app.post('/v1/responses', async (c) => {
+            const body = await c.req.json().catch(() => null);
+            if (!body || !body.model) return err(400, 'model required', 'invalid_request_error');
+            const chatBody = responsesToChat(body);
+            if (!chatBody.messages.length) return err(400, 'input required', 'invalid_request_error');
+            const subReq = new Request(new URL('/v1/chat/completions', c.req.url).toString(), {
+                method: 'POST',
+                headers: {
+                    'content-type': 'application/json',
+                    'authorization': c.req.header('authorization') || '',
+                    ...(c.req.header('x-api-key') ? { 'x-api-key': c.req.header('x-api-key') as string } : {}),
+                    ...(c.req.header('cookie') ? { 'cookie': c.req.header('cookie') as string } : {}),
+                },
+                body: JSON.stringify(chatBody),
+                // CF 特有：带 body 的 fetch 必须 duplex: 'half'，否则抛异常
+                duplex: 'half',
+            } as any);
+            const chatRes = await app.fetch(subReq, c.env, c.executionCtx);
+            if (!chatRes.ok) {
+                // 上游错误（chat 层已转 OpenAI error json）原样透传
+                return new Response(chatRes.body, { status: chatRes.status, headers: { 'content-type': 'application/json', ...upstreamHeaders(chatRes.headers) } });
+            }
+            const model = String(body.model);
+            if (chatBody.stream) {
+                if (!chatRes.body) return err(500, 'upstream response missing body', 'upstream_error');
+                return new Response(chatSSEToResponsesStream(chatRes.body, model), {
+                    status: 200,
+                    headers: { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache' },
+                });
+            }
+            const chatJson = await chatRes.json().catch(() => ({}));
+            return Response.json(chatToResponses(chatJson, model));
+        });
+
+        // =================================================================
+        // anthropic 协议转发：POST /v1/messages（Anthropic Messages API 原生格式，原样透传）
+        // 网关鉴权沿用上方 /v1/* 中间件；两种模式：
+        //   ① ?direct_provider=<id> 直连（仅允许 protocol==='anthropic' 的供应商）
+        //   ② 按 body.model 匹配路由规则 → 仅路由到 protocol==='anthropic' 的供应商
+        // 上游请求：{base_url}/v1/messages，鉴权头 x-api-key（Anthropic 用 x-api-key 而非 Bearer），
+        //          anthropic-version 透传请求头（默认 2023-06-01）
+        // 响应（含 SSE 流）原样透传，响应头白名单化（upstreamHeaders），错误按 Anthropic 风格提取 brief
+        // =================================================================
+        app.post('/v1/messages', async (c) => {
+            const body: any = await c.req.json().catch(() => null);
+            if (!body || typeof body !== 'object') return err(400, 'invalid request body：需为 JSON 对象', 'invalid_request_error');
+            const model = String(body.model || '');
+            if (!model) return err(400, 'model required：Anthropic Messages 请求需包含 model 字段', 'invalid_request_error');
+
+            const start = Date.now();
+            const directProvider = new URL(c.req.url).searchParams.get('direct_provider');
+            const anthropicVersion = c.req.header('anthropic-version') || '2023-06-01';
+
+            // 候选队列执行器：解密 Key → 构造上游请求 → 透传响应（非流式/流式）
+            const runQueue = async (queue: { p: db.Provider; k: db.KeyRow }[]): Promise<
+                { ok: Response } | { fail: { msg: string; status: number } }
+            > => {
+                let lastErr = '无可用供应商/Key';
+                let lastStatus = 502;
+                for (const { p, k } of queue) {
+                    let apiKey: string;
+                    try { apiKey = await decrypt(k.secret, await getEncryptKey(c.env)); }
+                    catch (e) { lastErr = `key ${k.id} 解密失败（请确认 ENCRYPT_KEY 与保存该 Key 时一致）`; continue; }
+                    const upstream = p.base_url + (p.base_url.endsWith('/') ? '' : '/') + 'v1/messages';
+                    try {
+                        const upstreamReq = new Request(upstream, {
+                            method: 'POST',
+                            headers: {
+                                'content-type': 'application/json',
+                                'x-api-key': apiKey,
+                                'anthropic-version': anthropicVersion,
+                                ...p.headers,
+                            },
+                            body: JSON.stringify(body),
+                            // CF 特有：带 body 的 fetch 必须 duplex: 'half'，否则抛异常
+                            duplex: 'half',
+                        } as any);
+                        const res = await fetch(upstreamReq);
+                        const latency = Date.now() - start;
+                        if (!res.ok) {
+                            const errText = await res.text().catch(() => '');
+                            let brief = errText.slice(0, 200) || res.statusText;
+                            try { const j = JSON.parse(errText); const em = j && j.error; if (em) brief = String(em.message || em.type || brief).slice(0, 200); } catch { /* 非 JSON 原样保留 */ }
+                            lastErr = `[${p.id}] HTTP ${res.status} ${brief}`;
+                            lastStatus = res.status;
+                            db.logRing.push({ model, provider: p.id, ok: false, latency_ms: latency, status: res.status });
+                            db.logRing.flush(c.env.DB);
+                            continue;
+                        }
+                        c.executionCtx.waitUntil(db.touchKey(c.env.DB, k.id));
+                        db.logRing.push({ model, provider: p.id, ok: true, latency_ms: latency, status: res.status });
+                        db.logRing.flush(c.env.DB);
+                        // 流式/非流式原样透传（Anthropic SSE 事件由客户端自行解析），响应头白名单化
+                        if (body.stream && res.body) return { ok: new Response(res.body, { status: res.status, headers: upstreamHeaders(res.headers) }) };
+                        const text = await res.text();
+                        return { ok: new Response(text, { status: res.status, headers: upstreamHeaders(res.headers) }) };
+                    } catch (e) { lastErr = e instanceof Error ? e.message : String(e); continue; }
+                }
+                return { fail: { msg: lastErr, status: lastStatus } };
+            };
+
+            // 直连模式
+            if (directProvider) {
+                const providers = await db.getProviders(c.env.DB);
+                const p = providers.find(x => x.id === directProvider);
+                if (!p) return err(404, `直连供应商「${directProvider}」不存在：请在「供应商」页确认 ID`, 'provider_not_found');
+                if (p.protocol !== 'anthropic') return err(400, `/v1/messages 仅转发 anthropic 协议供应商；「${p.name}」协议为 ${p.protocol}`, 'unsupported_protocol');
+                const keys = await db.getKeys(c.env.DB, p.id);
+                if (!keys.length) return err(502, `供应商「${p.name}」未配置 Key，无法直连`, 'provider_unavailable');
+                const r = await runQueue(keys.map(k => ({ p, k })));
+                if ('fail' in r) {
+                    db.logRing.push({ model, provider: 'none', ok: false, latency_ms: Date.now() - start, status: r.fail.status });
+                    db.logRing.flush(c.env.DB);
+                    return err(r.fail.status, `直连失败：${r.fail.msg}`, 'upstream_error');
+                }
+                return r.ok;
+            }
+
+            // 路由匹配：找命中的供应商（pattern 支持 * 通配）
+            const routes = await db.getRoutes(c.env.DB);
+            const matched = routes
+                .filter(r => {
+                    if (!r.enabled) return false;
+                    const re = patternToRegex(r.pattern);
+                    return !!re && re.test(model);
+                })
+                .sort((a, b) => b.priority - a.priority || b.created_at - a.created_at)[0];
+            if (!matched) {
+                db.logRing.push({ model, provider: 'none', ok: false, latency_ms: Date.now() - start, status: 404 });
+                db.logRing.flush(c.env.DB);
+                return err(404, `未配置模型「${model}」的转发路由：请先到管理后台「路由规则」添加匹配规则`, 'model_not_found');
+            }
+
+            const providers = await db.getProviders(c.env.DB);
+            const queue: { p: db.Provider; k: db.KeyRow }[] = [];
+            for (const pid of [...matched.providers, ...matched.fallback]) {
+                const p = providers.find(x => x.id === pid);
+                if (!p || p.protocol !== 'anthropic') continue;   // 本端点仅路由 anthropic 协议供应商
+                const keys = await db.getKeys(c.env.DB, p.id);
+                for (const k of keys) queue.push({ p, k });
+            }
+            if (!queue.length) {
+                db.logRing.push({ model, provider: 'none', ok: false, latency_ms: Date.now() - start, status: 502 });
+                db.logRing.flush(c.env.DB);
+                return err(502, `路由「${matched.name || matched.id}」下没有 anthropic 协议供应商或 Key，请先配置供应商 Key`, 'provider_unavailable');
+            }
+
+            // 模型名改写：路由 model_map 命中则替换上游 model
+            const upstreamModel = (matched.model_map || {})[model] || model;
+            if (upstreamModel !== model) body.model = upstreamModel;
+
+            const r = await runQueue(queue);
+            if ('fail' in r) {
+                db.logRing.push({ model, provider: 'none', ok: false, latency_ms: Date.now() - start, status: r.fail.status });
+                db.logRing.flush(c.env.DB);
+                return err(r.fail.status, `所有供应商均失败：${r.fail.msg}`, 'upstream_error');
+            }
+            return r.ok;
         });
 
         // =================================================================
