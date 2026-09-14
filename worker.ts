@@ -15,8 +15,6 @@ const APP_VERSION = '3.7.0';
 // ---------- 类型 ----------
 interface Env {
     DB: D1Database;
-    SESSION_SECRET: string;
-    DEFAULT_ADMIN_PASS: string;
     PROXY_KEY: string;
     API_TOKEN: string;
     ENCRYPT_KEY: string;          // 用于加密 keys.secret (AES-GCM)
@@ -32,24 +30,21 @@ function maskToken(t: string): string {
 }
 
 // 管理员鉴权（Cookie session + HMAC-SHA256 签名 + 24h 有效期）
-// 会话密钥优先用 env.SESSION_SECRET；未配置时回退到 bootstrap 写入 meta 的 session_secret
+// 会话密钥唯一来源：bootstrap 写入 meta 的 session_secret（env 版凭据已弃用）
 async function getSessionSecret(env: Env): Promise<string> {
-    if (env.SESSION_SECRET) return env.SESSION_SECRET;
     try {
         const s = await db.metaGet<string>(env.DB, 'session_secret', '');
         return s || '';
     } catch { return ''; }
 }
 
-// 凭据来源探测：环境变量优先，其次 meta（bootstrap 写入）。返回不抛错。
+// 凭据唯一来源：meta（bootstrap 写入）。返回不抛错。
 async function bootstrapMeta(env: Env): Promise<{ pass: string; secret: string }> {
-    let pass = env.DEFAULT_ADMIN_PASS || '';
-    let secret = env.SESSION_SECRET || '';
     try {
-        if (!pass) pass = await db.metaGet<string>(env.DB, 'admin_pass_hash', '');
-        if (!secret) secret = await db.metaGet<string>(env.DB, 'session_secret', '');
-    } catch { /* meta 表缺失时按未配置处理 */ }
-    return { pass, secret };
+        const pass = await db.metaGet<string>(env.DB, 'admin_pass_hash', '');
+        const secret = await db.metaGet<string>(env.DB, 'session_secret', '');
+        return { pass, secret };
+    } catch { /* meta 表缺失时按未配置处理 */ return { pass: '', secret: '' }; }
 }
 async function isAdmin(req: Request, env: Env): Promise<boolean> {
     const cookie = req.headers.get('cookie') || '';
@@ -866,10 +861,6 @@ export default {
             const cur = await bootstrapMeta(c.env);
             if (cur.pass || cur.secret) {
                 // 已初始化 → 重新初始化模式：必须提供当前密码校验，防止未授权重置
-                if (c.env.DEFAULT_ADMIN_PASS || c.env.SESSION_SECRET) {
-                    // env 优先：写入 meta 不会生效，直接引导改环境变量
-                    return err(409, '当前凭据来自环境变量（DEFAULT_ADMIN_PASS / SESSION_SECRET），后台重置不会生效。请直接在 Cloudflare 控制台修改环境变量并重新部署；如需改用数据库凭据，请先删除这两个环境变量');
-                }
                 if (!cur.pass) return err(409, '已初始化过，如需重置请先删除 meta 中 admin_pass_hash/session_secret');
                 if (typeof current_password !== 'string' || !current_password) return err(400, '已初始化过：请提供当前管理员密码（current_password）以重新初始化');
                 const curOk = await hmacSha256(cur.secret, current_password) === cur.pass;   // meta 来源：HMAC 比对
@@ -888,9 +879,7 @@ export default {
             if (String(new_password).length < 6) return err(400, '新密码至少 6 位');
             if (typeof old_password !== 'string' || !old_password) return err(400, '请提供当前密码');
             const { pass, secret } = await bootstrapMeta(c.env);
-            if (!pass || !secret) return err(500, '未配置管理员密码（使用环境变量时请直接修改 DEFAULT_ADMIN_PASS）');
-            // 密码来自环境变量时不允许通过后台修改（env 优先，改了 meta 也不生效），给出明确引导
-            if (c.env.DEFAULT_ADMIN_PASS) return err(409, '当前密码来自环境变量 DEFAULT_ADMIN_PASS，请直接在 Cloudflare 控制台修改环境变量并重新部署');
+            if (!pass || !secret) return err(500, '未配置管理员密码，请先用下方「快速初始化」完成首次配置');
             const verified = await hmacSha256(secret, old_password) === pass;
             if (!verified) return err(401, '当前密码错误');
             const hash = await hmacSha256(secret, String(new_password));
@@ -900,10 +889,10 @@ export default {
         app.post('/admin/api/login', async (c) => {
             const { pass, secret } = await bootstrapMeta(c.env);
             if (!pass) {
-                return err(500, '未配置管理员密码：请设置 DEFAULT_ADMIN_PASS 环境变量，或先用下方「快速初始化」完成首次配置');
+                return err(500, '未配置管理员密码，请先用「快速初始化」完成首次配置');
             }
             if (!secret) {
-                return err(500, '未配置会话密钥：请设置 SESSION_SECRET 环境变量，或先用下方「快速初始化」完成首次配置');
+                return err(500, '未配置会话密钥，请先用「快速初始化」完成首次配置');
             }
             // 登录失败限速（软限制）
             const ip = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || 'unknown';
@@ -914,11 +903,7 @@ export default {
             }
             const { password } = await c.req.json().catch(() => ({ password: '' }));
             let ok = false;
-            if (c.env.DEFAULT_ADMIN_PASS) {
-                ok = typeof password === 'string' && timingSafeEqual(password, c.env.DEFAULT_ADMIN_PASS);
-            } else {
-                ok = typeof password === 'string' && timingSafeEqual(await hmacSha256(secret, password), pass);
-            }
+            ok = typeof password === 'string' && timingSafeEqual(await hmacSha256(secret, password), pass);
             if (!ok) {
                 const f = loginFailures.get(ip);
                 if (!f || now - f.at >= LOGIN_LIMIT.windowMs) loginFailures.set(ip, { count: 1, at: now });
@@ -1900,10 +1885,10 @@ window.saveSettings = function(){
   }).catch(function(e){ toast('保存失败：'+(e&&e.error||e)); });
 };
 
-// 修改登录密码（校验当前密码；仅 meta 来源凭据可改，env 来源提示改环境变量）
+// 修改登录密码（校验当前密码；凭据来自 D1 meta）
 function render_pwd_form(){
   document.getElementById('pwd-form').innerHTML = ''
-    + '<div style="font-size:12px;color:var(--muted);margin-bottom:10px">修改后台登录密码（需输入当前密码验证；若密码来自环境变量 DEFAULT_ADMIN_PASS 请直接改环境变量）</div>'
+    + '<div style="font-size:12px;color:var(--muted);margin-bottom:10px">修改后台登录密码（需输入当前密码验证）</div>'
     + '<div class="form-row"><div style="flex:1"><label>当前密码</label><input id="pw-old" type="password" placeholder="当前登录密码" autocomplete="current-password"></div>'
     + '<div style="flex:1"><label>新密码（至少 6 位）</label><input id="pw-new" type="password" placeholder="新密码" autocomplete="new-password"></div></div>'
     + '<div class="form-row"><div style="flex:1"><label>确认新密码</label><input id="pw-new2" type="password" placeholder="再次输入新密码" autocomplete="new-password"></div><div style="flex:1"></div></div>'
@@ -2068,7 +2053,7 @@ function render_login(){
     +'<label style="font-size:12px;color:var(--muted)">管理员密码</label>'
     +'<input id="login-pass" type="password" style="width:100%;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:10px;border-radius:10px;margin:8px 0 16px" placeholder="请输入密码" onkeydown="if(event.key===\\'Enter\\')doLogin()">'
     +'<button class="btn" style="width:100%;padding:11px" onclick="doLogin()">登录</button>'
-    +'<p style="font-size:11px;color:var(--muted);margin-top:16px;text-align:center">凭据来自环境变量（DEFAULT_ADMIN_PASS / SESSION_SECRET）或首次初始化</p>'
+    +'<p style="font-size:11px;color:var(--muted);margin-top:16px;text-align:center">凭据存在后端数据库（首次使用请先完成初始化）</p>'
     +'<p style="font-size:12px;text-align:center;margin-top:10px"><a href="javascript:void(0)" onclick="openReinit()" style="color:var(--accent)">🔁 重新初始化（需当前密码）</a></p></div>';
 }
 window.doLogin=function(){api('POST','/admin/api/login',{password:document.getElementById('login-pass').value}).then(function(){toast('✅ 登录成功');render();startAutoRefresh();}).catch(function(e){toast('❌ '+((e&&e.error)||e||'登录失败'));});};
@@ -2096,7 +2081,7 @@ window.doReinitStep1=function(){
 function render_setup(reinit){
   var ab = document.getElementById('appbar');
   if(ab) ab.style.display='none';
-  var t = reinit ? { t:'🔄 重新初始化', d:'已配置过凭据，将用新密码/新密钥覆盖。提交前需校验当前密码。' } : { t:'🚀 iRouter 快速初始化', d:'首次部署请在此设置后台凭据，立即开始使用（已配置环境变量则可直接登录）' };
+  var t = reinit ? { t:'🔄 重新初始化', d:'已配置过凭据，将用新密码/新密钥覆盖。提交前需校验当前密码。' } : { t:'🚀 iRouter 快速初始化', d:'首次部署请在此设置后台凭据，立即开始使用' };
   document.getElementById('view').innerHTML='<div class="login-box">'
     +'<h2 style="text-align:center;margin-bottom:6px">'+t.t+'</h2>'
     +'<p style="text-align:center;font-size:12px;color:var(--muted);margin-bottom:20px">'+t.d+'</p>'
