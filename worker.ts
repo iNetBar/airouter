@@ -1922,7 +1922,7 @@ function render_prov_table(){
     return '<tr><td>'+esc(p.name)+'</td><td><code>'+esc(p.id)+'</code></td><td><code>'+esc(p.base_url)+'</code></td><td>'+esc(p.protocol)+'</td>'
       + '<td><span class="badge '+(p.builtin?'info':'plain')+'">'+(p.builtin?'内置':'自定义')+'</span></td>'
       + '<td>'+keysText+'</td>'
-      + '<td><span class="badge '+(p.enabled?'ok':'err')+'" style="cursor:pointer" onclick="toggleProvider(\\''+esc(p.id)+'\\')" title="点击切换状态">'+(p.enabled?'启用':'停用')+'</span></td>'
+      + '<td><span id="prov-st-'+esc(p.id)+'" class="badge '+(p.enabled?'ok':'err')+'" style="cursor:pointer" onclick="toggleProvider(\\''+esc(p.id)+'\\')" title="点击切换状态">'+(p.enabled?'启用':'停用')+'</span></td>'
       + '<td><div class="op-wrap"><button class="btn ghost" onclick="toggleOp(this)">⚙️ 操作 ▾</button><div class="op-drop">'
       + '<button onclick="testProvider(\\''+esc(p.id)+'\\')">🧪 测试连接</button>'
       + '<button onclick="editProvider(\\''+esc(p.id)+'\\')">✏️ 编辑</button>'
@@ -1967,7 +1967,17 @@ window.editProvider=function(id){var p=state.providers.find(function(x){return x
 window.submitEditProvider=function(id){api('PUT','/admin/api/providers/'+id,{name:document.getElementById('m-name').value,base_url:document.getElementById('m-url').value,enabled:document.getElementById('m-enabled').value==='1',key:document.getElementById('m-key').value.trim(),remove_keys:window._delKeys||[]}).then(function(){window._delKeys=[];closeModal();render_providers(document.getElementById('view'));toast('✅ 已更新');});};
 window.markDelKey=function(btn,kid){if(btn.disabled)return;btn.disabled=true;btn.textContent='✓ 待删除';btn.style.opacity=.55;(window._delKeys=window._delKeys||[]).push(kid);};
 window.deleteProvider=function(id){if(!confirm('确认删除？'))return;api('DELETE','/admin/api/providers/'+id).then(function(){render_providers(document.getElementById('view'));toast('🗑️ 已删除');});};
-window.toggleProvider=function(id){var p=state.providers.find(function(x){return x.id===id;});if(!p)return;api('PUT','/admin/api/providers/'+id,{enabled:!p.enabled}).then(function(){render_providers(document.getElementById('view'));toast(p.enabled?'✅ 已停用':'✅ 已启用');}).catch(function(e){toast('切换失败：'+(e&&e.error||e));});};
+window.toggleProvider=function(id){
+  var p=state.providers.find(function(x){return x.id===id;});
+  if(!p)return;
+  var next=!p.enabled;
+  api('PUT','/admin/api/providers/'+id,{enabled:next}).then(function(){
+    p.enabled=next;   // 先同步内存状态，再只更新该行徽章，不整页重渲染
+    var b=document.getElementById('prov-st-'+id);
+    if(b){ b.className='badge '+(next?'ok':'err'); b.textContent=next?'启用':'停用'; }
+    toast(next?'✅ 已启用':'✅ 已停用');
+  }).catch(function(e){toast('切换失败：'+(e&&e.error||e));});
+};
 
 // ---- 路由规则 ----
 function render_routes(main){
